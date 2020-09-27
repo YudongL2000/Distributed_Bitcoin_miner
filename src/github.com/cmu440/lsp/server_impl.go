@@ -15,16 +15,22 @@ import (
 type server struct {
 	udpAddr *lspnet.UDPAddr
 	clientList *clientList
+	readMsg chan []byte
 }
 
+// Stores all information of a client, defined when a connection is 
+// established
 type clientInfo struct {
 	connID int
+	conn *lspnet.UDPConn
 	next *clientInfo
 }
 
+// Stores a linked list of all clients, defined upon server creation
 type clientList struct {
-	clients *clientInfo
-	clientNum int
+	first *clientInfo
+	last *clientInfo
+	counter int // counter for creating connID
 }
 
 // NewServer creates, initiates, and returns a new server. This function should
@@ -53,13 +59,21 @@ func (s *server) Start() {
 			break
 		}
 
-		go s.MainRoutine()
-		go s.ReadRoutine()
+		c := &clientInfo{
+			connID: s.clientList.counter + 1,
+			conn: conn,
+			next: nil,
+		}
+		s.addClient(c)
+
+		go s.MainRoutine(c)
+		go s.ReadRoutine(c)
+		go s.WriteRoutine(c)
 
 	}
 }
 
-func (s *server) MainRoutine() {
+func (s *server) MainRoutine(c *clientInfo) {
 	for {
 		select {
 		default:
@@ -68,7 +82,22 @@ func (s *server) MainRoutine() {
 	}
 }
 
-func (s *server) ReadRoutine() {
+func (s *server) ReadRoutine(c *clientInfo) {
+	for {
+		select {
+		default:
+			buff := make([]byte, 2000)
+			len, cliAddr, err := c.conn.ReadFromUDP(buff[0:])
+
+			var msg Message
+			if json.Unmarshal(buff[0:len], &msg) != nil {
+				continue
+			}
+		}
+	}
+}
+
+func (s *server) WriteRoutine(c *clientInfo) {
 	for {
 		select {
 		default:
@@ -78,9 +107,11 @@ func (s *server) ReadRoutine() {
 }
 
 func (s *server) Read() (int, []byte, error) {
-	// TODO: remove this line when you are ready to begin implementing this method.
-	select {} // Blocks indefinitely.
-	return -1, nil, errors.New("not yet implemented")
+	for {
+		select {
+		default:
+		}
+	}
 }
 
 func (s *server) Write(connId int, payload []byte) error {
@@ -99,9 +130,21 @@ func (s *server) Close() error {
 // ============================= Helper Functions =============================
 func newClientList() *clientList {
 	cl := &clientList {
-		clients: nil,
-		clientNum: 0,
+		first: nil,
+		last: nil,
+		counter: 0,
 	}
 
 	return cl
+}
+
+func (s *server) addClient(c *clientInfo) {
+	if s.clientList.last == nil {
+		s.clientList.first = c
+		s.clientList.last = c
+	} else {
+		s.clientList.last.next = c
+		s.clientList.last = c
+	}
+	s.clientList.counter++
 }
