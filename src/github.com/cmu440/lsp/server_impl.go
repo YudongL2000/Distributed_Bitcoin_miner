@@ -9,20 +9,21 @@ import (
 	"encoding/json"
 	"bytes"
 	"log"
+	"strconv"
 )
 
 type server struct {
-	udpAddr *lspnet.UDPAddr,
+	udpAddr *lspnet.UDPAddr
 	clientList *clientList
 }
 
-type client struct {
+type clientInfo struct {
 	connID int
-	next *client
+	next *clientInfo
 }
 
 type clientList struct {
-	clients *client
+	clients *clientInfo
 	clientNum int
 }
 
@@ -33,10 +34,10 @@ type clientList struct {
 // project 0, etc.) and immediately return. It should return a non-nil error if
 // there was an error resolving or listening on the specified port number.
 func NewServer(port int, params *Params) (Server, error) {
-	addr, err := lspnet.ResolveUDPAddr("udp", port)
+	addr, err := lspnet.ResolveUDPAddr("udp", ":" + strconv.Itoa(port))
 	s := &server{
 		udpAddr: 	addr,
-		clientList: newClientList()
+		clientList: newClientList(),
 	}
 
 	go s.Start()
@@ -48,7 +49,7 @@ func NewServer(port int, params *Params) (Server, error) {
 func (s *server) Start() {
 	for {
 		conn, err := lspnet.ListenUDP("udp", s.udpAddr)
-		if err {
+		if err != nil {
 			break
 		}
 
@@ -96,10 +97,10 @@ func (s *server) Close() error {
 
 
 // ============================= Helper Functions =============================
-func newClientList() {
-	cl = &clientList {
+func newClientList() *clientList {
+	cl := &clientList {
 		clients: nil,
-		clientNum: 0
+		clientNum: 0,
 	}
 
 	return cl
