@@ -86,6 +86,7 @@ func (s *server) MainRoutine() {
 				select {
 				case msg := <-s.storeDataChan:
 					break
+
 				// TODO: close case
 				}				
 			}
@@ -98,6 +99,7 @@ func (s *server) MainRoutine() {
 					err: errors.New("client has disconnected")}
 			}
 			returnChan<- &readReqMsg{connID: msg.ConnID, payload: msg.Payload, err: nil}
+		
 		case write := <-s.writeChan:
 			sent := false
 			for e := s.clientList.Front(); e != nil; e = e.Next() {
@@ -109,9 +111,13 @@ func (s *server) MainRoutine() {
 			}
 			if !sent {
 				write.returnChan<- errors.New("connection closed")
+			} else {
+				write.returnChan<- nil
 			}
+		
 		case msg := <-s.storeDataChan:
 			s.storedData.PushBack(msg)
+
 		// TODO: close case
 		}
 	}
@@ -148,8 +154,6 @@ func (s *server) ClientRoutine(c *clientInfo) {
 	go s.WriteRoutine(c)
 	for {
 		select {
-		default:
-			break
 		case readMsg := <-c.readMsgChan:
 			switch readMsg.Type {
 				case MsgConnect:
@@ -175,6 +179,7 @@ func (s *server) ClientRoutine(c *clientInfo) {
 					// Shouldn't happen
 					continue
 			}
+
 		case write := <-c.writeReqChan:
 			// TODO: implement sliding window
 			msg := NewData(
@@ -186,6 +191,7 @@ func (s *server) ClientRoutine(c *clientInfo) {
 			)
 			c.currSN++
 			c.writeMsgChan<- msg
+
 		// TODO: close case, send msg with nil payload to mainroutine
 		}
 	}
@@ -203,6 +209,7 @@ func (s *server) ReadRoutine(c *clientInfo) {
 				continue
 			}
 			c.readMsgChan <- &msg
+
 		// TODO: close case
 		}
 	}
@@ -211,8 +218,6 @@ func (s *server) ReadRoutine(c *clientInfo) {
 func (s *server) WriteRoutine(c *clientInfo) {
 	for {
 		select {
-		default:
-			continue
 		case writeMsg := <-c.writeMsgChan:
 			b, err := json.Marshal(writeMsg)
 			if err != nil {
@@ -223,6 +228,7 @@ func (s *server) WriteRoutine(c *clientInfo) {
 			if writeErr != nil {
 				break
 			}
+
 		// TODO: close case
 		}
 	}
@@ -236,7 +242,10 @@ func (s *server) Read() (int, []byte, error) {
 }
 
 func (s *server) Write(connId int, payload []byte) error {
-	return errors.New("not yet implemented")
+	errorChan := make(chan error)
+	s.writeChan<- &writeReqMsg{returnChan: errorChan, connID: connId, payload: payload}
+	err := <-errorChan
+	return err
 }
 
 func (s *server) CloseConn(connId int) error {
