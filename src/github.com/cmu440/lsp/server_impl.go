@@ -2,10 +2,28 @@
 
 package lsp
 
-import "errors"
+import (
+	"errors"
+	"github.com/cmu440/lspnet"
+	"fmt"
+	"encoding/json"
+	"bytes"
+	"log"
+)
 
 type server struct {
-	// TODO: Implement this!
+	udpAddr *lspnet.UDPAddr,
+	clientList *clientList
+}
+
+type client struct {
+	connID int
+	next *client
+}
+
+type clientList struct {
+	clients *client
+	clientNum int
 }
 
 // NewServer creates, initiates, and returns a new server. This function should
@@ -15,7 +33,47 @@ type server struct {
 // project 0, etc.) and immediately return. It should return a non-nil error if
 // there was an error resolving or listening on the specified port number.
 func NewServer(port int, params *Params) (Server, error) {
-	return nil, errors.New("not yet implemented")
+	addr, err := lspnet.ResolveUDPAddr("udp", port)
+	s := &server{
+		udpAddr: 	addr,
+		clientList: newClientList()
+	}
+
+	go s.Start()
+
+	return s, err
+}
+
+// Start the server, listen for any incoming connections
+func (s *server) Start() {
+	for {
+		conn, err := lspnet.ListenUDP("udp", s.udpAddr)
+		if err {
+			break
+		}
+
+		go s.MainRoutine()
+		go s.ReadRoutine()
+
+	}
+}
+
+func (s *server) MainRoutine() {
+	for {
+		select {
+		default:
+			break
+		}
+	}
+}
+
+func (s *server) ReadRoutine() {
+	for {
+		select {
+		default:
+			break
+		}
+	}
 }
 
 func (s *server) Read() (int, []byte, error) {
@@ -34,4 +92,15 @@ func (s *server) CloseConn(connId int) error {
 
 func (s *server) Close() error {
 	return errors.New("not yet implemented")
+}
+
+
+// ============================= Helper Functions =============================
+func newClientList() {
+	cl = &clientList {
+		clients: nil,
+		clientNum: 0
+	}
+
+	return cl
 }
