@@ -10,12 +10,18 @@ import (
 	"bytes"
 	"log"
 	"strconv"
+	"container/list"
 )
 
 type server struct {
 	udpAddr *lspnet.UDPAddr
-	clientList *clientList
-	readMsg chan []byte
+	// Stores a linked list of all clients, defined upon server creation
+	clientList *list.List
+	readChan chan chan *readReqMsg // used for Read() requests
+	writeChan chan *writeReqMsg // used for Write() requests
+	storeDataChan chan *Message // used to store data sent by clients
+	storedData *list.List
+	counter int // counter for creating connID
 }
 
 // Stores all information of a client, defined when a connection is 
@@ -23,14 +29,26 @@ type server struct {
 type clientInfo struct {
 	connID int
 	conn *lspnet.UDPConn
-	next *clientInfo
+	readMsgChan chan *Message
+	writeMsgChan chan *Message
+	writeReqChan chan *writeReqMsg // Used for Write() requests
+	pendingWrites *list.List // List of Messages pending to be written
+	unackedWrites *list.List // List of sent but unacked Messages
+	unorderedReads *list.List // List of unordered read Messages
+	lastReadSN int // The seq num of the last in order Message
+	currSN int // Current Sequence Number
 }
 
-// Stores a linked list of all clients, defined upon server creation
-type clientList struct {
-	first *clientInfo
-	last *clientInfo
-	counter int // counter for creating connID
+type readReqMsg struct {
+	connID int
+	payload []byte
+	err error
+}
+
+type writeReqMsg struct {
+	returnChan chan error
+	connID int
+	payload []byte
 }
 
 // NewServer creates, initiates, and returns a new server. This function should
@@ -42,16 +60,64 @@ type clientList struct {
 func NewServer(port int, params *Params) (Server, error) {
 	addr, err := lspnet.ResolveUDPAddr("udp", ":" + strconv.Itoa(port))
 	s := &server{
-		udpAddr: 	addr,
-		clientList: newClientList(),
+		udpAddr: 		addr,
+		clientList: 	list.New(),
+		readChan:   	make(chan chan *readReqMsg),
+		writeChan:  	make(chan *writeReqMsg),
+		storeDataChan:  make(chan *Message),
+		storedData: 	list.New(),
+		counter:    	0,
 	}
 
-	go s.Start()
+	go s.MainRoutine()
 
 	return s, err
 }
 
-// Start the server, listen for any incoming connections
+// Stores all data coming from clients, process write / read requests
+func (s *server) MainRoutine() {
+	go s.Start()
+
+	for {
+		select {
+		case returnChan := <-s.readChan:
+			var msg Message
+			if s.storedData.Len() == 0 {
+				select {
+				case msg := <-s.storeDataChan:
+					break
+				// TODO: close case
+				}				
+			}
+			s.storedData.PushBack(msg)
+			msg = s.storedData.Remove(s.storedData.Front()).(Message)
+			if msg.Payload == nil {
+				returnChan<- &readReqMsg{
+					connID: msg.ConnID, 
+					payload: nil, 
+					err: errors.New("client has disconnected")}
+			}
+			returnChan<- &readReqMsg{connID: msg.ConnID, payload: msg.Payload, err: nil}
+		case write := <-s.writeChan:
+			sent := false
+			for e := s.clientList.Front(); e != nil; e = e.Next() {
+				c := e.Value.(clientInfo)
+				if write.connID == c.connID {
+					c.writeReqChan<- write
+					break
+				}
+			}
+			if !sent {
+				write.returnChan<- errors.New("connection closed")
+			}
+		case msg := <-s.storeDataChan:
+			s.storedData.PushBack(msg)
+		// TODO: close case
+		}
+	}
+}
+
+// Listens for any incoming connections
 func (s *server) Start() {
 	for {
 		conn, err := lspnet.ListenUDP("udp", s.udpAddr)
@@ -60,24 +126,67 @@ func (s *server) Start() {
 		}
 
 		c := &clientInfo{
-			connID: s.clientList.counter + 1,
+			connID: s.counter + 1,
 			conn: conn,
-			next: nil,
+			readMsgChan: make(chan *Message),
+			writeMsgChan: make(chan *Message),
+			pendingWrites: list.New(),
+			unackedWrites: list.New(),
+			unorderedReads: list.New(),
+			lastReadSN: 0,
+			currSN: 0,
 		}
-		s.addClient(c)
+		s.clientList.PushBack(c)
+		s.counter++
 
-		go s.MainRoutine(c)
-		go s.ReadRoutine(c)
-		go s.WriteRoutine(c)
-
+		go s.ClientRoutine(c)
 	}
 }
 
-func (s *server) MainRoutine(c *clientInfo) {
+func (s *server) ClientRoutine(c *clientInfo) {
+	go s.ReadRoutine(c)
+	go s.WriteRoutine(c)
 	for {
 		select {
 		default:
 			break
+		case readMsg := <-c.readMsgChan:
+			switch readMsg.Type {
+				case MsgConnect:
+					msg := NewAck(c.connID, c.currSN)
+					c.currSN++
+					c.writeMsgChan<- msg
+				case MsgData:
+					c.unorderedReads.PushFront(readMsg)
+					// check for in order reads
+					for e := c.unorderedReads.Front(); e != nil; e = e.Next() {
+						if e.Value.(Message).SeqNum == c.lastReadSN + 1 {
+							next := e.Next()
+							msg := c.unorderedReads.Remove(e).(Message)
+							s.storeDataChan<- &msg
+							c.writeMsgChan<- NewAck(c.connID, msg.SeqNum)
+							c.lastReadSN++
+							e = next
+						}
+					}
+				case MsgAck:
+					// TODO: implement sliding window
+				default:
+					// Shouldn't happen
+					continue
+			}
+		case write := <-c.writeReqChan:
+			// TODO: implement sliding window
+			msg := NewData(
+				c.connID, 
+				c.currSN, 
+				len(write.payload), 
+				write.payload,
+				checkSum(c.connID, c.currSN, write.payload, len(write.payload)),
+			)
+			c.currSN++
+			c.writeMsgChan<- msg
+		// TODO: close case, send msg with nil payload to mainroutine
 		}
 	}
 }
@@ -93,6 +202,8 @@ func (s *server) ReadRoutine(c *clientInfo) {
 			if json.Unmarshal(buff[0:len], &msg) != nil {
 				continue
 			}
+			c.readMsgChan <- &msg
+		// TODO: close case
 		}
 	}
 }
@@ -101,17 +212,27 @@ func (s *server) WriteRoutine(c *clientInfo) {
 	for {
 		select {
 		default:
-			break
+			continue
+		case writeMsg := <-c.writeMsgChan:
+			b, err := json.Marshal(writeMsg)
+			if err != nil {
+				break
+			}
+
+			_, writeErr := c.conn.Write(b)
+			if writeErr != nil {
+				break
+			}
+		// TODO: close case
 		}
 	}
 }
 
 func (s *server) Read() (int, []byte, error) {
-	for {
-		select {
-		default:
-		}
-	}
+	returnChan := make(chan *readReqMsg)
+	s.readChan<- returnChan
+	msg := <-returnChan
+	return msg.connID, msg.payload, msg.err
 }
 
 func (s *server) Write(connId int, payload []byte) error {
@@ -128,23 +249,7 @@ func (s *server) Close() error {
 
 
 // ============================= Helper Functions =============================
-func newClientList() *clientList {
-	cl := &clientList {
-		first: nil,
-		last: nil,
-		counter: 0,
-	}
-
-	return cl
-}
-
-func (s *server) addClient(c *clientInfo) {
-	if s.clientList.last == nil {
-		s.clientList.first = c
-		s.clientList.last = c
-	} else {
-		s.clientList.last.next = c
-		s.clientList.last = c
-	}
-	s.clientList.counter++
+func checkSum(connID int, seqNum int, payload []byte, size int) uint16 {
+	// TODO: implement me
+	return uint16(0)
 }
