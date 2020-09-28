@@ -3,11 +3,11 @@
 package lsp
 
 import (
-	"bytes"
+	//"bytes"
 	"encoding/json"
 	"errors"
 	"github.com/cmu440/lspnet"
-	"time"
+	//"time"
 )
 
 const MaxMessgeByteLen = 2000
@@ -49,7 +49,7 @@ func NewClient(hostport string, params *Params) (Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	conn, connError = lspnet.DialUDP("udp", nil, addr)
+	conn, connError := lspnet.DialUDP("udp", nil, addr)
 	if connError != nil {
 		return nil, connError
 	}
@@ -101,14 +101,21 @@ func (c *client) Read() ([]byte, error) {
 }
 
 //unimplemented
-func (c *client) message2CheckSum(ID int, seqNum int, payload []byte) uint32 {
-	var checksum uint
-	checksum := 0
-	checksum += Int2Checksum(connID)
-	checksum += Int2Checksum(seqNum)
-	checksum += Int2Checksum(size)
-	checksum += ByteArray2Checksum(payload)
-	return checksum
+func (c *client) message2CheckSum(ID int, seqNum int, size int, payload []byte) uint16 {
+	var checksumTmp uint32
+	var mask uint32
+	mask = 0x0000ffff
+	checksumTmp = 0
+	checksumTmp += Int2Checksum(ID)
+	checksumTmp += Int2Checksum(seqNum)
+	checksumTmp += Int2Checksum(size)
+	checksumTmp += ByteArray2Checksum(payload)
+	for checksumTmp > 0xffff {
+		curSum := checksumTmp >> 16
+		remain := checksumTmp & mask
+		checksumTmp = curSum + remain
+	}
+	return uint16(checksumTmp)
 }
 
 func (c *client) Write(payload []byte) error {
@@ -132,11 +139,11 @@ func (c *client) terminateConnection() {
 }
 
 func (c *client) writeMsg(msg *Message) error {
-	content, err = json.Marshal(msg)
+	content, err := json.Marshal(msg)
 	if err != nil {
 		return err
 	} else {
-		_, writeErr = c.connection.Write(content)
+		_, writeErr := c.connection.Write(content)
 		if writeErr != nil {
 			return writeErr
 		}
@@ -146,10 +153,10 @@ func (c *client) writeMsg(msg *Message) error {
 
 //wait for implementation
 func checkCorrupted(m *Message) bool {
+	if len(m.Payload) != m.Size {
+		return false
+	}
 	/*
-		if len(m.Payload) != m.Size {
-			return false
-		}
 		if message2CheckSum(m.ConnID, m.SeqNum, m.Size, m.Payload) != m.Checksum {
 			return false
 		}
@@ -159,7 +166,7 @@ func checkCorrupted(m *Message) bool {
 
 func (c *client) sendAllAvailable() {
 	counter := 0
-	for i, m := range c.unsentBuffer {
+	for _, m := range c.unsentBuffer {
 		if c.windowStart < 0 {
 			c.writeMsg(m)
 			c.unAcked = append(c.unAcked, m)
@@ -195,12 +202,12 @@ func (c *client) mainRoutine() {
 			c.writeQuit <- true
 			c.dataRecieverQuit = true
 			if (len(c.unAcked) == 0) && (len(c.unsentBuffer) == 0) {
-				terminateConnection()
+				c.terminateConnection()
 				return
 			}
 		case ack := <-c.incomeAck:
 			if c.dataRecieverQuit && (len(c.unAcked) == 0) && (len(c.unsentBuffer) == 0) {
-				terminateConnection()
+				c.terminateConnection()
 				return
 			}
 			sn := ack.SeqNum
@@ -238,7 +245,7 @@ func (c *client) mainRoutine() {
 			}
 		case payload := <-c.outgoPayload:
 			payloadSize := len(payload)
-			checkSum := message2CheckSum(c.connID, c.seqNum, payloadSize, payload)
+			checkSum := c.message2CheckSum(c.connID, c.seqNum, payloadSize, payload)
 			m := NewData(c.connID, c.seqNum, payloadSize, payload, checkSum)
 			c.seqNum += 1
 			if c.windowStart < 0 {
