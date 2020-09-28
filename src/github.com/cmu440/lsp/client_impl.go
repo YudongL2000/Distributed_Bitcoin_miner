@@ -3,30 +3,35 @@
 package lsp
 
 import (
-	"errors"
-	"time"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"github.com/cmu440/lspnet"
+	"time"
 )
 
 const MaxMessgeByteLen = 2000
 
 type client struct {
-	params   *Params
-	connID   int
-	connection  *lspnet.UDPConn
-	seqNum      int
-	seqNumChan  chan int
-	seqNumReq   chan bool
-	sendAvailable chan bool
-	windowStart   int
-	unAcked       []*Message
-	incomeMessage chan *Message
-	outgoMessage  chan *Message
-	readQuit      chan bool
-	writeQuit   chan bool
-	quit        chan bool
+	params           *Params
+	connID           int
+	connection       *lspnet.UDPConn
+	connectionAck    chan bool
+	seqNum           int
+	wantedMsg        int
+	readResponse     chan *Message
+	windowStart      int
+	unAcked          []*Message
+	unsentBuffer     []*Message
+	receivedMsg      []*Message
+	incomeAck        chan *Message
+	outgoPayload     chan []byte
+	recieveData      chan *Message
+	readQuit         chan bool
+	writeQuit        chan bool
+	readRoutineQuit  chan bool
+	dataRecieverQuit bool
+	quit             chan bool
 }
 
 // NewClient creates, initiates, and returns a new client. This function
@@ -49,56 +54,55 @@ func NewClient(hostport string, params *Params) (Client, error) {
 		return nil, connError
 	}
 	c := &client{
-		params:   params,
-		connID:   -1,
-		connection:  conn,
-		seqNum:      1,
-		seqNumChan:  make(chan int),
-		seqNumReq:   make(chan bool),
-		sendAvailable: make(chan bool),
-		windowStart: -1,
-		unAcked:     nil,
-		incomeMessage:   make(chan *Message),
-		outgoMessage:    make(chan *Message),
-		readQuit:        make(chan bool),
-		writeQuit:   make(chan bool),
-		quit:        make(chan bool),
+		params:           params,
+		connID:           -1,
+		connection:       conn,
+		connectionAck:    make(chan bool),
+		seqNum:           1,
+		wantedMsg:        1,
+		readResponse:     make(chan *Message),
+		windowStart:      -1,
+		unAcked:          nil,
+		unsentBuffer:     nil,
+		receivedMsg:      nil,
+		incomeAck:        make(chan *Message),
+		outgoPayload:     make(chan []byte),
+		recieveData:      make(chan *Message),
+		readQuit:         make(chan bool),
+		writeQuit:        make(chan bool),
+		readRoutineQuit:  make(chan bool),
+		dataRecieverQuit: false,
+		quit:             make(chan bool),
 	}
 
-	c.sendAvailable <- true
 	go c.readRoutine()
 	go c.mainRoutine()
 	connectedMsg := NewConnect()
-	res , err := json.Marshal(connectedMsg)
+	c.writeMsg(connectedMsg)
 
-	return nil, errors.New("not yet implemented")
+	<-c.connectionAck
+	return c, nil
 }
 
 func (c *client) ConnID() int {
 	return c.connID
 }
 
-
-
-
 func (c *client) Read() ([]byte, error) {
 	// TODO: remove this line when you are ready to begin implementing this method.
 	select {
-	case <- c.quit:
-		return (nil, errors.New("Client disconnected"))
+	case <-c.readQuit:
+		return nil, errors.New("Client disconnected")
 	default:
-
-
-
-	} // Blocks indefinitely.
-	return nil, errors.New("not yet implemented")
+		msg := <-c.readResponse
+		c.wantedMsg += 1
+		return msg.Payload, nil
+	}
 }
 
-
-
 //unimplemented
-func (c *client) message2CheckSum(ID int, seqNum int, payload []byte) uint32{
-	var checksum uint 
+func (c *client) message2CheckSum(ID int, seqNum int, payload []byte) uint32 {
+	var checksum uint
 	checksum := 0
 	checksum += Int2Checksum(connID)
 	checksum += Int2Checksum(seqNum)
@@ -107,21 +111,14 @@ func (c *client) message2CheckSum(ID int, seqNum int, payload []byte) uint32{
 	return checksum
 }
 
-
 func (c *client) Write(payload []byte) error {
-	select{
+	select {
 	case <-c.writeQuit:
-		return errors.New("Connection has been droped")
+		return errors.New("Connection has been dropped")
 	default:
-		c.sendAvailable <- true
-		c.seqNumReq <- true
-		newSeqNum :<- c.seqNumChan
-		payloadSize := len(payload)
-		checkSum := message2CheckSum(c.connID, seqNum, payloadSize, payload)
-		c.outgoMessage <- NewData(c.connID, newSeqNum, payloadSize, payload, checkSum)
+		c.outgoPayload <- payload
 		return nil
 	}
-	//return errors.New("not yet implemented")
 }
 
 func (c *client) Close() error {
@@ -129,22 +126,17 @@ func (c *client) Close() error {
 	return nil
 }
 
-func (c *client)processAllRemain(){
-
+func (c *client) terminateConnection() {
+	c.readRoutineQuit <- true
+	c.connection.Close()
 }
 
-func (c *client)terminateAll(){
-
-}
-
-
-
-func (c *client)writeMsg(msg *Message) error {
+func (c *client) writeMsg(msg *Message) error {
 	content, err = json.Marshal(msg)
 	if err != nil {
 		return err
 	} else {
-		res, writeErr = c.connection.Write(content)
+		_, writeErr = c.connection.Write(content)
 		if writeErr != nil {
 			return writeErr
 		}
@@ -153,86 +145,136 @@ func (c *client)writeMsg(msg *Message) error {
 }
 
 //wait for implementation
-func checkCorrupted(m *Message) bool{
-	if len(m.Payload) != m.Size {
-		return false
-	}
-	if message2CheckSum(m.ConnID, m.SeqNum, m.Size, m.Payload) != m.Checksum {
-		return false
-	}
+func checkCorrupted(m *Message) bool {
+	/*
+		if len(m.Payload) != m.Size {
+			return false
+		}
+		if message2CheckSum(m.ConnID, m.SeqNum, m.Size, m.Payload) != m.Checksum {
+			return false
+		}
+	*/
 	return true
 }
 
-func checkIfFull
+func (c *client) sendAllAvailable() {
+	counter := 0
+	for i, m := range c.unsentBuffer {
+		if c.windowStart < 0 {
+			c.writeMsg(m)
+			c.unAcked = append(c.unAcked, m)
+			c.windowStart = m.SeqNum
+			counter += 1
+		} else if (m.SeqNum <= c.params.WindowSize+c.windowStart-1) && (len(c.unAcked) < c.params.MaxUnackedMessages) {
+			c.writeMsg(m)
+			c.unAcked = append(c.unAcked, m)
+			counter += 1
+		} else {
+			break
+		}
+	}
+	c.unsentBuffer = c.unsentBuffer[counter:]
+}
 
+//maintain the order of the recieved messages
+func (c *client) insertMsg(msg *Message) {
+	for i, m := range c.receivedMsg {
+		if m.SeqNum > msg.SeqNum {
+			c.receivedMsg = append(append(c.receivedMsg[:i], msg), c.receivedMsg[i:]...)
+			return
+		}
+	}
+	c.receivedMsg = append(c.receivedMsg, msg)
+}
 
 func (c *client) mainRoutine() {
 	for {
-		select{
+		select {
 		case <-c.quit:
-			c.processAllRemain()
-			c.terminateAll()
-		case <- c.seqNumReq:
-			c.seqNumChan <- c.seqNum
-			c.seqNum += 1 
-			if (c.windowStart <0) || (c.windowStart > 0 && (m.SeqNum <= c.params.WindowSize + c.windowStart -1)) {
-				<- c.sendAvailable 
+			c.readQuit <- true
+			c.writeQuit <- true
+			c.dataRecieverQuit = true
+			if (len(c.unAcked) == 0) && (len(c.unsentBuffer) == 0) {
+				terminateConnection()
+				return
 			}
-		case m :<- c.incomeMessage:
-			switch m.Type {
-			case MsgData:
-				if (checkCorrupted(m)){
-					ackMsg := NewAck(m.ConnID, m.SeqNum)
-					c.outgoMessage <- ackMsg
-				} 
-			case MsgAck:
-				sn := m.SeqNum
-				if sn < c.windowStart || c.windowStart <0 {
-					continue
-				} else {
-					for i, snum := range c.unAcked {
-						if snum == sn {
-							c.unAcked = append(c.unAcked[:i], c.unAcked[i+1:]...)
-							if len(c.unAcked) > 0 {
-								c.windowStart = c.unAcked[0]
-							} else {
-								//none unAcknoledged message exists
-								c.windowStart = -1
-							}
-							break
+		case ack := <-c.incomeAck:
+			if c.dataRecieverQuit && (len(c.unAcked) == 0) && (len(c.unsentBuffer) == 0) {
+				terminateConnection()
+				return
+			}
+			sn := ack.SeqNum
+			if sn < c.windowStart || c.windowStart < 0 {
+				if sn == 0 {
+					c.connectionAck <- true
+				}
+			} else {
+				for i, storeMsg := range c.unAcked {
+					if storeMsg.SeqNum == sn {
+						c.unAcked = append(c.unAcked[:i], c.unAcked[i+1:]...)
+						if len(c.unAcked) > 0 {
+							c.windowStart = c.unAcked[0].SeqNum
+						} else {
+							//none unAcknoledged message exists
+							c.windowStart = -1
 						}
+						//send the waiting messages in the buffer
+						c.sendAllAvailable()
 					}
 				}
 			}
-		case <- c.sendAvailable:
-			case m :<- outgoMessage:
-				if c.windowStart < 0 {
-					c.unAcked = append(c.unAcked, m.SeqNum)
-					c.windowStart = m.SeqNum
-					writeMsg(m) 
-				} else if (m.SeqNum <= c.params.WindowSize + c.windowStart -1) && (len(c.unAcked) < c.params.MaxUnackedMessages) {
-					c.unAcked = append(c.unAcked, m.SeqNum)
-					writeMsg(m)				
+		case msg := <-c.recieveData:
+			if c.dataRecieverQuit {
+				continue
+			} else if checkCorrupted(msg) {
+				c.insertMsg(msg)
+				if (c.receivedMsg[0]).SeqNum == c.wantedMsg {
+					m := c.receivedMsg[0]
+					c.receivedMsg = c.receivedMsg[1:]
+					c.readResponse <- m
 				}
+				ackMsg := NewAck(msg.ConnID, msg.SeqNum)
+				c.writeMsg(ackMsg)
+			}
+		case payload := <-c.outgoPayload:
+			payloadSize := len(payload)
+			checkSum := message2CheckSum(c.connID, c.seqNum, payloadSize, payload)
+			m := NewData(c.connID, c.seqNum, payloadSize, payload, checkSum)
+			c.seqNum += 1
+			if c.windowStart < 0 {
+				c.unAcked = append(c.unAcked, m)
+				c.windowStart = m.SeqNum
+				c.writeMsg(m)
+			} else if (m.SeqNum <= c.params.WindowSize+c.windowStart-1) && (len(c.unAcked) < c.params.MaxUnackedMessages) {
+				c.unAcked = append(c.unAcked, m)
+				c.writeMsg(m)
+			} else {
+				c.unsentBuffer = append(c.unsentBuffer, m)
+			}
 		}
 	}
 }
 
 func (c *client) readRoutine() {
 	for {
-		select{
-		case <- c.readQuit:
-			return 
+		select {
+		case <-c.readRoutineQuit:
+			return
 		default:
 			b := make([]byte, MaxMessgeByteLen)
 			realLen, err := c.connection.Read(b)
 			if err == nil {
 				var newMsg Message
-				err :=  json.Unmarshal(b[:realLen], &newMsg)
-				if err != nil {
-					return err
-				} else {
-					c.incomeMessage <- &newMsg
+				var msg *Message
+				err := json.Unmarshal(b[:realLen], &newMsg)
+				msg = &newMsg
+				if err == nil {
+					switch msg.Type {
+					case MsgData:
+						c.recieveData <- msg
+					case MsgAck:
+						c.incomeAck <- msg
+					}
 				}
 			}
 		}
