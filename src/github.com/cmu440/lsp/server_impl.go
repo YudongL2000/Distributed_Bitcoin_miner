@@ -10,15 +10,18 @@ import (
 	//"bytes"
 	//"log"
 	"strconv"
-	"container/list"
 )
 
 type server struct {
 	udpAddr *lspnet.UDPAddr
 	udpConn *lspnet.UDPConn
 	// Stores a linked list of all clients, defined upon server creation
-	clientList *list.List
+	clients []*clientInfo
 	counter int // counter for creating connID
+	// Channels for receiving messages
+	incomeData    chan *Message
+	incomeAck     chan *Message
+	incomeConn    chan *lspnet.UDPAddr
 }
 
 // Stores all information of a client, defined when a connection is 
@@ -38,120 +41,126 @@ type clientInfo struct {
 func NewServer(port int, params *Params) (Server, error) {
 	addr, resErr := lspnet.ResolveUDPAddr("udp", ":" + strconv.Itoa(port))
 	if resErr != nil {
-		return nil, resErr
+	    return nil, resErr
 	}
 	serverConn, listErr := lspnet.ListenUDP("udp", addr)
 	if listErr != nil {
-		return nil, listErr
+	    return nil, listErr
 	}
-
+	
 	s := &server{
-		udpAddr: 		addr,
-		udpConn: 		serverConn,
-		clientList: 	list.New(),
-		counter:    	0,
+	    udpAddr:        addr,
+	    udpConn:        serverConn,
+	    clients:        nil,
+	    counter:        0,
 	}
-
+	
 	go s.MainRoutine()
 	go s.ReadRoutine()
-
+	
 	return s, nil
 }
 
+// Processes all incoming messages
 func (s *server) MainRoutine() {
-		// // Check message type
-		// 	switch readMsg.Type {
-		// 		case MsgConnect:
-		// 			
-
-		// 		case MsgData:
-		// 			c.unorderedReads.PushFront(readMsg)
-		// 			// check for in order reads
-		// 			for e := c.unorderedReads.Front(); e != nil; e = e.Next() {
-		// 				if e.Value.(Message).SeqNum == c.lastReadSN + 1 {
-		// 					next := e.Next()
-		// 					msg := c.unorderedReads.Remove(e).(Message)
-		// 					s.storeDataChan<- &msg
-		// 					c.writeMsgChan<- NewAck(c.connID, msg.SeqNum)
-		// 					c.lastReadSN++
-		// 					e = next
-		// 				}
-		// 			}
-
-		// 		case MsgAck:
-		// 			// TODO: implement sliding window
-		// 		default:
-		// 			// Shouldn't happen
-		// 			continue
-		//	}
-
+	for {
+	    select {
+	    // new connections 
+	    case addr := <-s.incomeConn:
+	    	s.addClient(addr)
+	
+	    // new data msgs
+	    case msg  := <-s.incomeData:
+	    	fmt.Println(msg)
+	
+	    // ack msgs & epoch msgs
+	    case msg  := <-s.incomeAck:
+	    	fmt.Println(msg)
+	    }
+	}
 }
 
+// Reads from udp connection; determines the msg type and sends msg to 
+// mainroutine for further processing
 func (s *server) ReadRoutine() {
 	for {
-		// Read from connection
-			buff := make([]byte, 2000)
-			len, cliAddr, err := s.udpConn.ReadFromUDP(buff[0:])
-			if err != nil {
-				continue
-			}
-			
-			// Parse message
-			var readMsg Message
-			if json.Unmarshal(buff[0:len], &readMsg) != nil {
-				continue
-			}
-
-			// Check for existing clients
-			found := false
-			client := s.findClient(cliAddr)
-			if client != nil {
-				found = true
-			}
-
-			if !found {
-				c := clientInfo{
-					connID: s.counter + 1,
-					cliAddr: cliAddr,
-					currSN: 0,
-				}
-				s.clientList.PushBack(c)
-				s.counter++
-			}
-			fmt.Println(cliAddr)
-			fmt.Println(found)
-			fmt.Println(readMsg.String())
+	    // Read from connection
+	        buff := make([]byte, 2000)
+	        len, cliAddr, err := s.udpConn.ReadFromUDP(buff[0:])
+	        if err != nil {
+	            return
+	        }
+	        
+	        // Parse message
+	        var readMsg Message
+	        if json.Unmarshal(buff[0:len], &readMsg) != nil {
+	            continue
+	        }
+	
+	        // Check message type
+	        switch readMsg.Type {
+	            case MsgConnect:
+	                s.incomeConn<- cliAddr
+	
+	            case MsgData:
+	                s.incomeData<- &readMsg
+	
+	            case MsgAck:
+	                // TODO: implement sliding window
+	                s.incomeAck<- &readMsg
+	        }
 	}
 }
 
 func (s *server) Read() (int, []byte, error) {
-	select {} // Blocks indefinitely.
-	return -1, nil, errors.New("not yet implemented")
+    select {} // Blocks indefinitely.
+    return -1, nil, errors.New("not yet implemented")
 }
 
 func (s *server) Write(connId int, payload []byte) error {
-	return errors.New("not yet implemented")
+    return errors.New("not yet implemented")
 }
 
 func (s *server) CloseConn(connId int) error {
-	return errors.New("not yet implemented")
+    return errors.New("not yet implemented")
 }
 
 func (s *server) Close() error {
-	return errors.New("not yet implemented")
+    return errors.New("not yet implemented")
 }
 
 // ============================= Helper Functions =============================
 func checkSum(connID int, seqNum int, payload []byte, size int) uint16 {
-	// TODO: implement me
-	return uint16(0)
+    // TODO: implement me
+    return uint16(0)
 }
 
-func (s *server) findClient(addr *lspnet.UDPAddr) *list.Element {
-	for e := s.clientList.Front(); e != nil; e = e.Next() {
-		if e.Value.(clientInfo).cliAddr.String() == addr.String() {
-			return e
-		}
-	}
-	return nil
+func (s *server) addClient(addr *lspnet.UDPAddr) {
+	c := &clientInfo{
+        connID: s.counter + 1,
+        cliAddr: addr,
+        currSN: 0,
+    }
+
+    s.clients = append(s.clients, c)
+    s.counter++
+}
+
+func (s *server) findClient(connid int) *clientInfo {
+    for _, c := range s.clients {
+        if c.connID == connid {
+            return c
+        }
+    }
+    return nil
+}
+
+func (s *server) removeClient(connid int) *clientInfo {
+    for i, c := range s.clients {
+        if c.connID == connid {
+            s.clients[i] = s.clients[len(s.clients) - 1]
+            return c
+        }
+    }
+    return nil
 }
