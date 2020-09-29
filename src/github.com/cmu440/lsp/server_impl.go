@@ -10,6 +10,7 @@ import (
 	//"bytes"
 	//"log"
 	"strconv"
+	"sort"
 )
 
 type server struct {
@@ -92,6 +93,7 @@ func (s *server) MainRoutine() {
 	    	ack := NewAck(c.connID, c.writeSeqNum + 1)
 	    	c.writeSeqNum++
 	    	s.writeToClient(c, ack)
+
 	    	fmt.Println(ack)
 	
 	    // ack msgs & epoch msgs
@@ -211,18 +213,25 @@ func (s *server) storeData(c *clientInfo, msg *Message) {
 		s.orderedData = append(s.orderedData, msg)
 		c.readSeqNum++
 
-	fmt.Println("good data")
 		var newData []*Message // stores remaining unordered msgs
 		for _, d := range c.pendingData {
 			if d.SeqNum == c.readSeqNum + 1 {
-				s.orderedData = append(s.orderedData, msg)
+				s.orderedData = append(s.orderedData, d)
 				c.readSeqNum++
 			} else {
 				newData = append(newData, d)
 			}
 		}
 		c.pendingData = newData
+		sort.Slice(c.pendingData, func(i, j int) bool {
+			return c.pendingData[i].SeqNum < c.pendingData[j].SeqNum
+		})
+		return
 	} 
 	
 	c.pendingData = append(c.pendingData, msg)
+	sort.Slice(c.pendingData, func(i, j int) bool {
+		return c.pendingData[i].SeqNum < c.pendingData[j].SeqNum
+	})
+	return
 }
