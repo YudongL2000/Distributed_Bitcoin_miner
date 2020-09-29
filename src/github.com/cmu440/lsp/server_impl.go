@@ -24,7 +24,8 @@ type server struct {
 	incomeData    chan *Message
 	incomeAck     chan *Message
 	// Messages
-	orderedData  []*Message
+	orderedData	[]*Message
+	readChan chan *readMsg
 }
 
 // Stores all information of a client, defined when a connection is 
@@ -37,6 +38,12 @@ type clientInfo struct {
 	pendingData []*Message // Incoming unordered msgs
 	pendingWrites []*Message // Unsent msgs (due to window size, etc)
 	unackedWrites []*Message // Sent msgs but not acked by client
+}
+
+type readMsg struct {
+	connID int
+	payload []byte
+	err error
 }
 
 // NewServer creates, initiates, and returns a new server. This function should
@@ -63,6 +70,7 @@ func NewServer(port int, params *Params) (Server, error) {
 	    incomeConn:     make(chan *lspnet.UDPAddr),
 	    incomeData:     make(chan *Message),
 	    incomeAck:      make(chan *Message),
+	    readChan: 	    make(chan *readMsg),
 	}
 	
 	go s.MainRoutine()
@@ -94,6 +102,26 @@ func (s *server) MainRoutine() {
 	    	c.writeSeqNum++
 	    	s.writeToClient(c, ack)
 
+	    	go func() {
+	    		if s.readChan == nil {
+	    			return
+	    		}
+	    		if len(s.readChan) != 0 {
+	    			<-s.readChan
+	    		}
+	    		data := s.orderedData[len(s.orderedData) - 1]
+	    		var err error
+	    		if data.Payload == nil {
+	    			err = errors.New("client connection has been closed")
+	    		} else {
+	    			err = nil
+	    		}
+	    		s.readChan<- &readMsg {
+	    			connID: data.ConnID,
+	    			payload: data.Payload,
+	    			err: err,
+	    		}
+	    	} ()
 	    	fmt.Println(ack)
 	
 	    // ack msgs & epoch msgs
@@ -136,8 +164,11 @@ func (s *server) ReadRoutine() {
 }
 
 func (s *server) Read() (int, []byte, error) {
-    select {} // Blocks indefinitely.
-    return -1, nil, errors.New("not yet implemented")
+    if s.readChan == nil {
+    	return 0, nil, errors.New("The server has been closed")
+    }
+    ret := <-s.readChan
+    return ret.connID, ret.payload, ret.err
 }
 
 func (s *server) Write(connId int, payload []byte) error {
