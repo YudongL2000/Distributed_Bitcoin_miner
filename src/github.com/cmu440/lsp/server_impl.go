@@ -5,10 +5,7 @@ package lsp
 import (
 	"errors"
 	"github.com/cmu440/lspnet"
-	"fmt"
 	"encoding/json"
-	//"bytes"
-	//"log"
 	"strconv"
 	"sort"
 )
@@ -19,13 +16,9 @@ type server struct {
 	// Stores a linked list of all clients, defined upon server creation
 	clients []*clientInfo
 	counter int // counter for creating connID
-	// Channels for receiving messages
-	incomeConn    chan *lspnet.UDPAddr
-	incomeData    chan *Message
-	incomeAck     chan *Message
 	// Messages
-	orderedData	[]*Message
-	readChan chan *readMsg
+	orderedData []*Message
+	readChan chan *Message
 	writeChan chan *writeMsg
 }
 
@@ -39,12 +32,6 @@ type clientInfo struct {
 	pendingData []*Message // Incoming unordered msgs
 	pendingWrites []*Message // Unsent msgs (due to window size, etc)
 	unackedWrites []*Message // Sent msgs but not acked by client
-}
-
-type readMsg struct {
-	connID int
-	payload []byte
-	err error
 }
 
 type writeMsg struct {
@@ -74,10 +61,9 @@ func NewServer(port int, params *Params) (Server, error) {
 	    udpConn:        serverConn,
 	    clients:        nil,
 	    counter:        0,
-	    incomeConn:     make(chan *lspnet.UDPAddr),
-	    incomeData:     make(chan *Message),
-	    incomeAck:      make(chan *Message),
-	    readChan: 	    make(chan *readMsg),
+	    orderedData:    nil,
+	    readChan:       make(chan *Message, 20),
+	    writeChan:      make(chan *writeMsg),
 	}
 	
 	go s.MainRoutine()
@@ -90,71 +76,23 @@ func NewServer(port int, params *Params) (Server, error) {
 func (s *server) MainRoutine() {
 	for {
 	    select {
-	    // new connections 
-	    case addr := <-s.incomeConn:
-	    	c := s.addClient(addr)
-	    	// send ack msg
-	    	ack := NewAck(c.connID, 0)
-	    	s.writeToClient(c, ack)
+		case req  := <-s.writeChan:
+	        c := s.findClient(req.connID)
+	        if c == nil {
+	            req.retChan<- errors.New("client connection has been closed")
+	            break
+	        }
+	        req.retChan<- nil
 	
-	    // new data msgs
-	    case msg  := <-s.incomeData:
-	    	c := s.findClient(msg.ConnID)
-	    	if c == nil {
-	    		break
-	    	}
-	    	s.storeData(c, msg)
-	    	// send ack msg
-	    	ack := NewAck(c.connID, c.writeSeqNum + 1)
-	    	c.writeSeqNum++
-	    	s.writeToClient(c, ack)
-
-	    	// send data to s.readChan once available
-	    	go func() {
-	    		if s.readChan == nil || len(s.orderedData) == 0 {
-	    			return
-	    		}
-	    		if len(s.readChan) != 0 {
-	    			<-s.readChan
-	    		}
-	    		data := s.orderedData[len(s.orderedData) - 1]
-	    		var err error
-	    		if data.Payload == nil {
-	    			err = errors.New("client connection has been closed")
-	    		} else {
-	    			err = nil
-	    		}
-	    		s.readChan<- &readMsg {
-	    			connID: data.ConnID,
-	    			payload: data.Payload,
-	    			err: err,
-	    		}
-	    		fmt.Println("finished read")
-	    	} ()
-	    	fmt.Println(ack)
-	
-	    // ack msgs & epoch msgs
-	    case msg  := <-s.incomeAck:
-	    	fmt.Println(msg)
-
-	    case req  := <-s.writeChan:
-	    	c := s.findClient(req.connID)
-	    	if c == nil {
-	    		req.retChan<- errors.New("client connection has been closed")
-	    		break
-	    	}
-	    	req.retChan<- nil
-
-	    	cs := s.CalculateCheckSum(
-	    		c.connID, c.writeSeqNum + 1,len(req.payload), req.payload,
-	    	)
-	    	msg := NewData(
-	    		c.connID, c.writeSeqNum + 1, len(req.payload), 
-	    		req.payload, cs,
-	    	)
-	    	c.writeSeqNum++
-	    	fmt.Println(msg.String())
-	    	s.writeToClient(c, msg)
+	        cs := s.CalculateCheckSum(
+	            c.connID, c.writeSeqNum + 1,len(req.payload), req.payload,
+	        )
+	        msg := NewData(
+	            c.connID, c.writeSeqNum + 1, len(req.payload), 
+	            req.payload, cs,
+	        )
+	        c.writeSeqNum++
+	        s.writeToClient(c, msg)
 	    }
 	}
 }
@@ -162,8 +100,8 @@ func (s *server) MainRoutine() {
 // Reads from udp connection; determines the msg type and sends msg to 
 // mainroutine for further processing
 func (s *server) ReadRoutine() {
-	for {
-	    // Read from connection
+    for {
+        // Read from connection
         buff := make([]byte, 2000)
         len, cliAddr, err := s.udpConn.ReadFromUDP(buff[0:])
         if err != nil {
@@ -171,43 +109,50 @@ func (s *server) ReadRoutine() {
         }
         
         // Parse message
-        var readMsg Message
-        if json.Unmarshal(buff[0:len], &readMsg) != nil {
+        var msg Message
+        if json.Unmarshal(buff[0:len], &msg) != nil {
             continue
         }
-        fmt.Println(readMsg.String())
         // Check message type
-        switch readMsg.Type {
+        switch msg.Type {
             case MsgConnect:
-                s.incomeConn<- cliAddr
+                addr := cliAddr
+                c := s.addClient(addr)
+                // send ack msg
+                ack := NewAck(c.connID, 0)
+                s.writeToClient(c, ack)
 
             case MsgData:
-                s.incomeData<- &readMsg
+                c := s.findClient(msg.ConnID)
+                if c == nil {
+                    break
+                }
+                s.storeData(c, &msg)
+                // send ack msg
+                ack := NewAck(c.connID, msg.SeqNum)
+                s.writeToClient(c, ack)
 
             case MsgAck:
-                // TODO: implement sliding window
-                s.incomeAck<- &readMsg
+            // TODO: implement sliding window
         }
-	}
+    }
 }
 
 func (s *server) Read() (int, []byte, error) {
     if s.readChan == nil {
-    	return 0, nil, errors.New("The server has been closed")
+        return 0, nil, errors.New("The server has been closed")
     }
-    ret := <-s.readChan
-    return ret.connID, ret.payload, ret.err
+    msg := <-s.readChan
+    return msg.ConnID, msg.Payload, nil
 }
 
 func (s *server) Write(connId int, payload []byte) error {
     errChan := make(chan error)
-    fmt.Println("called write")
     s.writeChan<- &writeMsg {
-    	connID: connId,
-		payload: payload,
-		retChan: errChan,
+        connID: connId,
+        payload: payload,
+        retChan: errChan,
     }
-    fmt.Println("finished write")
 
     return <-errChan
 }
@@ -221,14 +166,9 @@ func (s *server) Close() error {
 }
 
 // ============================= Helper Functions =============================
-func checkSum(connID int, seqNum int, payload []byte, size int) uint16 {
-    // TODO: implement me
-    return uint16(0)
-}
-
 // Creates a new client and add to server's list; returns the new client
 func (s *server) addClient(addr *lspnet.UDPAddr) *clientInfo {
-	c := &clientInfo{
+    c := &clientInfo{
         connID: s.counter + 1,
         cliAddr: addr,
         writeSeqNum: 0,
@@ -260,72 +200,68 @@ func (s *server) removeClient(connid int) *clientInfo {
 }
 
 func (s *server) writeToClient(c *clientInfo, msg *Message) error {
-	b, marshalErr := json.Marshal(msg)
-	if marshalErr != nil {
-		return marshalErr
-	}
+    b, marshalErr := json.Marshal(msg)
+    if marshalErr != nil {
+        return marshalErr
+    }
 
-	_, writeErr := s.udpConn.WriteToUDP(b, c.cliAddr)
-	if writeErr != nil {
-		return writeErr
-	}
-	return nil
+    _, writeErr := s.udpConn.WriteToUDP(b, c.cliAddr)
+    if writeErr != nil {
+        return writeErr
+    }
+    return nil
 }
 
 // Stores input data msg in server if it is in order, otherwise stores in client,
 // checks for remaining client stored msgs in client and move now ordered msgs to
 // server
 func (s *server) storeData(c *clientInfo, msg *Message) {
-	// Msg in order, store in the list
-	if msg.SeqNum == c.readSeqNum + 1 {
-		s.orderedData = append(s.orderedData, msg)
-		c.readSeqNum++
+    // Msg in order, store in the list
+    if msg.SeqNum == c.readSeqNum + 1 {
+        s.orderedData = append(s.orderedData, msg)
+        c.readSeqNum++
+        
+        var newData []*Message // stores remaining unordered msgs
+        for _, d := range c.pendingData {
+            if d.SeqNum == c.readSeqNum + 1 {
+                s.orderedData = append(s.orderedData, d)
+                c.readSeqNum++
 
-		var newData []*Message // stores remaining unordered msgs
-		for _, d := range c.pendingData {
-			if d.SeqNum == c.readSeqNum + 1 {
-				s.orderedData = append(s.orderedData, d)
-				c.readSeqNum++
-			} else {
-				newData = append(newData, d)
-			}
-		}
-		c.pendingData = newData
-	} else {
-		c.pendingData = append(c.pendingData, msg)		
-	}
-	
-	// sort unordered msgs
-	sort.Slice(c.pendingData, func(i, j int) bool {
-		return c.pendingData[i].SeqNum < c.pendingData[j].SeqNum
-	})
-	return
+            } else {
+                newData = append(newData, d)
+            }
+        }
+        c.pendingData = newData
+    } else {
+        c.pendingData = append(c.pendingData, msg)      
+    }
+    
+    // sort unordered msgs
+    sort.Slice(c.pendingData, func(i, j int) bool {
+        return c.pendingData[i].SeqNum < c.pendingData[j].SeqNum
+    })
+
+    data := s.orderedData
+    s.orderedData = nil
+    for _, d := range data {
+        s.readChan <- d
+    }
+    return
 }
 
 func (s *server) CalculateCheckSum(ID int, seqNum int, size int, payload []byte) uint16 {
-    // var checksumTmp uint32
-    // var mask uint32
-    // mask = 0x0000ffff
-    // checksumTmp = 0
-    // checksumTmp += Int2Checksum(ID)
-    // checksumTmp += Int2Checksum(seqNum)
-    // checksumTmp += Int2Checksum(size)
-    // checksumTmp += ByteArray2Checksum(payload)
-    // for checksumTmp > 0xffff {
-    //  curSum := checksumTmp >> 16
-    //  remain := checksumTmp & mask
-    //  checksumTmp = curSum + remain
-    // }
-    // return uint16(checksumTmp)
-
-    // For testing with crunner_sol
+    var checksumTmp uint32
     var mask uint32
     mask = 0x0000ffff
-    checksumTmp := ByteArray2Checksum(payload)
+    checksumTmp = 0
+    checksumTmp += Int2Checksum(ID)
+    checksumTmp += Int2Checksum(seqNum)
+    checksumTmp += Int2Checksum(size)
+    checksumTmp += ByteArray2Checksum(payload)
     for checksumTmp > 0xffff {
-        curSum := checksumTmp >> 16
-        remain := checksumTmp & mask
-        checksumTmp = curSum + remain
+     curSum := checksumTmp >> 16
+     remain := checksumTmp & mask
+     checksumTmp = curSum + remain
     }
     return uint16(checksumTmp)
 }
