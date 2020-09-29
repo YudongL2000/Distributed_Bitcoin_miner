@@ -26,6 +26,7 @@ type server struct {
 	// Messages
 	orderedData	[]*Message
 	readChan chan *readMsg
+	writeChan chan *writeMsg
 }
 
 // Stores all information of a client, defined when a connection is 
@@ -44,6 +45,12 @@ type readMsg struct {
 	connID int
 	payload []byte
 	err error
+}
+
+type writeMsg struct {
+	connID int
+	payload []byte
+	retChan chan error
 }
 
 // NewServer creates, initiates, and returns a new server. This function should
@@ -102,8 +109,9 @@ func (s *server) MainRoutine() {
 	    	c.writeSeqNum++
 	    	s.writeToClient(c, ack)
 
+	    	// send data to s.readChan once available
 	    	go func() {
-	    		if s.readChan == nil {
+	    		if s.readChan == nil || len(s.orderedData) == 0 {
 	    			return
 	    		}
 	    		if len(s.readChan) != 0 {
@@ -121,12 +129,32 @@ func (s *server) MainRoutine() {
 	    			payload: data.Payload,
 	    			err: err,
 	    		}
+	    		fmt.Println("finished read")
 	    	} ()
 	    	fmt.Println(ack)
 	
 	    // ack msgs & epoch msgs
 	    case msg  := <-s.incomeAck:
 	    	fmt.Println(msg)
+
+	    case req  := <-s.writeChan:
+	    	c := s.findClient(req.connID)
+	    	if c == nil {
+	    		req.retChan<- errors.New("client connection has been closed")
+	    		break
+	    	}
+	    	req.retChan<- nil
+
+	    	cs := s.CalculateCheckSum(
+	    		c.connID, c.writeSeqNum + 1,len(req.payload), req.payload,
+	    	)
+	    	msg := NewData(
+	    		c.connID, c.writeSeqNum + 1, len(req.payload), 
+	    		req.payload, cs,
+	    	)
+	    	c.writeSeqNum++
+	    	fmt.Println(msg.String())
+	    	s.writeToClient(c, msg)
 	    }
 	}
 }
@@ -172,7 +200,16 @@ func (s *server) Read() (int, []byte, error) {
 }
 
 func (s *server) Write(connId int, payload []byte) error {
-    return errors.New("not yet implemented")
+    errChan := make(chan error)
+    fmt.Println("called write")
+    s.writeChan<- &writeMsg {
+    	connID: connId,
+		payload: payload,
+		retChan: errChan,
+    }
+    fmt.Println("finished write")
+
+    return <-errChan
 }
 
 func (s *server) CloseConn(connId int) error {
@@ -263,4 +300,32 @@ func (s *server) storeData(c *clientInfo, msg *Message) {
 		return c.pendingData[i].SeqNum < c.pendingData[j].SeqNum
 	})
 	return
+}
+
+func (s *server) CalculateCheckSum(ID int, seqNum int, size int, payload []byte) uint16 {
+    // var checksumTmp uint32
+    // var mask uint32
+    // mask = 0x0000ffff
+    // checksumTmp = 0
+    // checksumTmp += Int2Checksum(ID)
+    // checksumTmp += Int2Checksum(seqNum)
+    // checksumTmp += Int2Checksum(size)
+    // checksumTmp += ByteArray2Checksum(payload)
+    // for checksumTmp > 0xffff {
+    //  curSum := checksumTmp >> 16
+    //  remain := checksumTmp & mask
+    //  checksumTmp = curSum + remain
+    // }
+    // return uint16(checksumTmp)
+
+    // For testing with crunner_sol
+    var mask uint32
+    mask = 0x0000ffff
+    checksumTmp := ByteArray2Checksum(payload)
+    for checksumTmp > 0xffff {
+        curSum := checksumTmp >> 16
+        remain := checksumTmp & mask
+        checksumTmp = curSum + remain
+    }
+    return uint16(checksumTmp)
 }
