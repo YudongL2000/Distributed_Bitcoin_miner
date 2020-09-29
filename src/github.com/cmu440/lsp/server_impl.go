@@ -223,13 +223,11 @@ func (s *server) storeData(c *clientInfo, msg *Message) {
 			}
 		}
 		c.pendingData = newData
-		sort.Slice(c.pendingData, func(i, j int) bool {
-			return c.pendingData[i].SeqNum < c.pendingData[j].SeqNum
-		})
-		return
-	} 
+	} else {
+		c.pendingData = append(c.pendingData, msg)		
+	}
 	
-	c.pendingData = append(c.pendingData, msg)
+	// sort unordered msgs
 	sort.Slice(c.pendingData, func(i, j int) bool {
 		return c.pendingData[i].SeqNum < c.pendingData[j].SeqNum
 	})
