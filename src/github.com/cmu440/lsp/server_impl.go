@@ -19,9 +19,11 @@ type server struct {
 	clients []*clientInfo
 	counter int // counter for creating connID
 	// Channels for receiving messages
+	incomeConn    chan *lspnet.UDPAddr
 	incomeData    chan *Message
 	incomeAck     chan *Message
-	incomeConn    chan *lspnet.UDPAddr
+	// Messages
+	orderedData  []*Message
 }
 
 // Stores all information of a client, defined when a connection is 
@@ -29,7 +31,11 @@ type server struct {
 type clientInfo struct {
 	connID int
 	cliAddr *lspnet.UDPAddr
-	currSN int // Current Sequence Number
+	writeSeqNum int // Latest Sequence Number for writes
+	readSeqNum int // Latest Sequence Number (ordered) for reads
+	pendingData []*Message // Incoming unordered msgs
+	pendingWrites []*Message // Unsent msgs (due to window size, etc)
+	unackedWrites []*Message // Sent msgs but not acked by client
 }
 
 // NewServer creates, initiates, and returns a new server. This function should
@@ -53,6 +59,9 @@ func NewServer(port int, params *Params) (Server, error) {
 	    udpConn:        serverConn,
 	    clients:        nil,
 	    counter:        0,
+	    incomeConn:     make(chan *lspnet.UDPAddr),
+	    incomeData:     make(chan *Message),
+	    incomeAck:      make(chan *Message),
 	}
 	
 	go s.MainRoutine()
@@ -67,11 +76,23 @@ func (s *server) MainRoutine() {
 	    select {
 	    // new connections 
 	    case addr := <-s.incomeConn:
-	    	s.addClient(addr)
+	    	c := s.addClient(addr)
+	    	// send ack msg
+	    	ack := NewAck(c.connID, 0)
+	    	s.writeToClient(c, ack)
 	
 	    // new data msgs
 	    case msg  := <-s.incomeData:
-	    	fmt.Println(msg)
+	    	c := s.findClient(msg.ConnID)
+	    	if c == nil {
+	    		break
+	    	}
+	    	s.storeData(c, msg)
+	    	// send ack msg
+	    	ack := NewAck(c.connID, c.writeSeqNum + 1)
+	    	c.writeSeqNum++
+	    	s.writeToClient(c, ack)
+	    	fmt.Println(ack)
 	
 	    // ack msgs & epoch msgs
 	    case msg  := <-s.incomeAck:
@@ -85,30 +106,30 @@ func (s *server) MainRoutine() {
 func (s *server) ReadRoutine() {
 	for {
 	    // Read from connection
-	        buff := make([]byte, 2000)
-	        len, cliAddr, err := s.udpConn.ReadFromUDP(buff[0:])
-	        if err != nil {
-	            return
-	        }
-	        
-	        // Parse message
-	        var readMsg Message
-	        if json.Unmarshal(buff[0:len], &readMsg) != nil {
-	            continue
-	        }
-	
-	        // Check message type
-	        switch readMsg.Type {
-	            case MsgConnect:
-	                s.incomeConn<- cliAddr
-	
-	            case MsgData:
-	                s.incomeData<- &readMsg
-	
-	            case MsgAck:
-	                // TODO: implement sliding window
-	                s.incomeAck<- &readMsg
-	        }
+        buff := make([]byte, 2000)
+        len, cliAddr, err := s.udpConn.ReadFromUDP(buff[0:])
+        if err != nil {
+            return
+        }
+        
+        // Parse message
+        var readMsg Message
+        if json.Unmarshal(buff[0:len], &readMsg) != nil {
+            continue
+        }
+        fmt.Println(readMsg.String())
+        // Check message type
+        switch readMsg.Type {
+            case MsgConnect:
+                s.incomeConn<- cliAddr
+
+            case MsgData:
+                s.incomeData<- &readMsg
+
+            case MsgAck:
+                // TODO: implement sliding window
+                s.incomeAck<- &readMsg
+        }
 	}
 }
 
@@ -135,15 +156,18 @@ func checkSum(connID int, seqNum int, payload []byte, size int) uint16 {
     return uint16(0)
 }
 
-func (s *server) addClient(addr *lspnet.UDPAddr) {
+// Creates a new client and add to server's list; returns the new client
+func (s *server) addClient(addr *lspnet.UDPAddr) *clientInfo {
 	c := &clientInfo{
         connID: s.counter + 1,
         cliAddr: addr,
-        currSN: 0,
+        writeSeqNum: 0,
+        readSeqNum: 0,
     }
 
     s.clients = append(s.clients, c)
     s.counter++
+    return c
 }
 
 func (s *server) findClient(connid int) *clientInfo {
@@ -163,4 +187,42 @@ func (s *server) removeClient(connid int) *clientInfo {
         }
     }
     return nil
+}
+
+func (s *server) writeToClient(c *clientInfo, msg *Message) error {
+	b, marshalErr := json.Marshal(msg)
+	if marshalErr != nil {
+		return marshalErr
+	}
+
+	_, writeErr := s.udpConn.WriteToUDP(b, c.cliAddr)
+	if writeErr != nil {
+		return writeErr
+	}
+	return nil
+}
+
+// Stores input data msg in server if it is in order, otherwise stores in client,
+// checks for remaining client stored msgs in client and move now ordered msgs to
+// server
+func (s *server) storeData(c *clientInfo, msg *Message) {
+	// Msg in order, store in the list
+	if msg.SeqNum == c.readSeqNum + 1 {
+		s.orderedData = append(s.orderedData, msg)
+		c.readSeqNum++
+
+	fmt.Println("good data")
+		var newData []*Message // stores remaining unordered msgs
+		for _, d := range c.pendingData {
+			if d.SeqNum == c.readSeqNum + 1 {
+				s.orderedData = append(s.orderedData, msg)
+				c.readSeqNum++
+			} else {
+				newData = append(newData, d)
+			}
+		}
+		c.pendingData = newData
+	} 
+	
+	c.pendingData = append(c.pendingData, msg)
 }
