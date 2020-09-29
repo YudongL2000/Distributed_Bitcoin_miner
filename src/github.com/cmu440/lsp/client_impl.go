@@ -3,12 +3,9 @@
 package lsp
 
 import (
-	//"bytes"
 	"encoding/json"
 	"errors"
-	//"fmt"
 	"github.com/cmu440/lspnet"
-	//"time"
 )
 
 const MaxMessgeByteLen = 2000
@@ -77,7 +74,6 @@ func NewClient(hostport string, params *Params) (Client, error) {
 	connectedMsg := NewConnect()
 	c.WriteMsg(connectedMsg)
 	<-c.connectionAck
-	//fmt.Printf("connection acknowledged\n")
 	return c, nil
 }
 
@@ -230,7 +226,6 @@ func (c *client) MainRoutine() {
 				c.StoreData(msg)
 			}
 		case payload := <-c.outgoPayload:
-			//fmt.Printf("have payload to send")
 			payloadSize := len(payload)
 			checkSum := c.Message2CheckSum(c.connID, c.seqNum, payloadSize, payload)
 			m := NewData(c.connID, c.seqNum, payloadSize, payload, checkSum)
@@ -254,17 +249,14 @@ func (c *client) ReadRoutine() {
 		var b [MaxMessgeByteLen]byte
 		realLen, err := c.connection.Read(b[:])
 		if err == nil {
-			//fmt.Printf("\nreceived server\n")
 			var newMsg Message
 			errMarshal := json.Unmarshal(b[:realLen], &newMsg)
 			msg := &newMsg
 			if errMarshal == nil {
 				switch msg.Type {
 				case MsgData:
-					//fmt.Printf("incoming data received %v\n", msg.SeqNum)
 					c.incomeData <- msg
 				case MsgAck:
-					//fmt.Printf("incoming acknowledge for request %v\n", msg.SeqNum)
 					c.incomeAck <- msg
 				}
 			}
