@@ -1,19 +1,11 @@
 package lsp
 
-import (
-	//"bytes"
-	"encoding/json"
-	"errors"
-	//"fmt"
-	"github.com/cmu440/lspnet"
-	"time"
-)
 
 type node struct {
-	prev *node
-	next *node
+	prev   *node
+	next   *node
 	seqNum int
-	msg *Message
+	msg    *Message
 }
 
 type list struct {
@@ -22,17 +14,17 @@ type list struct {
 }
 
 func newList() *list {
-	newL:= &list{
+	newL := &list{
 		head: nil,
 		tail: nil,
 	}
 	return newL
 }
 
-func listCheck (L *list) bool {
+func listCheck(L *list) bool {
 	if L.head == nil && L.tail != nil {
 		return false
-	} else if L.head != nil && L.tail == nil{
+	} else if L.head != nil && L.tail == nil {
 		return false
 	} else if L.head == nil {
 		return true
@@ -41,7 +33,7 @@ func listCheck (L *list) bool {
 	for tracer != nil {
 		if tracer.seqNum != tracer.msg.SeqNum {
 			return false
-		} 
+		}
 		if tracer.prev != nil {
 			if tracer.prev.next != tracer {
 				return false
@@ -57,14 +49,14 @@ func listCheck (L *list) bool {
 	return true
 }
 
-func empty(L *list) bool{
+func empty(L *list) bool {
 	if L.head == nil && L.tail == nil {
 		return true
 	}
 	return false
 }
 
-func checkPresent(msg *Message, L *list) bool{
+func checkPresent(msg *Message, L *list) bool {
 	if empty(L) {
 		return false
 	} else {
@@ -73,25 +65,25 @@ func checkPresent(msg *Message, L *list) bool{
 			if tracer.seqNum == msg.SeqNum {
 				return true
 			}
-			tracer=tracer.next
+			tracer = tracer.next
 		}
 		return false
 	}
 }
 
 func listInsert(msg *Message, L *list) {
-	newNode = &node{
-		prev: nil,
-		next: nil,
-		seqNum: msg.SeqNum
-		msg: msg
+	newNode := &node{
+		prev:   nil,
+		next:   nil,
+		seqNum: msg.SeqNum,
+		msg:    msg,
 	}
 	if empty(L) {
 		L.head = newNode
 		L.tail = newNode
 		return
 	} else if (L.head == L.tail) && (L.head != nil) {
-		first = L.head
+		first := L.head
 		if first.seqNum > msg.SeqNum {
 			newNode.next = first
 			newNode.prev = nil
@@ -112,7 +104,7 @@ func listInsert(msg *Message, L *list) {
 			newNode.next = nil
 			L.tail = newNode
 			return
-		} else if (L.tail.seqNum == msg.SeqNum) {
+		} else if L.tail.seqNum == msg.SeqNum {
 			return
 		}
 		//more than one node in list
@@ -124,7 +116,7 @@ func listInsert(msg *Message, L *list) {
 				if tracer == L.head {
 					tracer.prev = newNode
 					newNode.next = tracer
-					newNode.prev= nil
+					newNode.prev = nil
 					L.head = newNode
 					return
 				} else {
@@ -141,8 +133,7 @@ func listInsert(msg *Message, L *list) {
 	}
 }
 
-
-func removeSeqNum (num int, L *list) *Message{
+func removeSeqNum(num int, L *list) *Message {
 	tracer := L.head
 	for tracer != nil {
 		if tracer.seqNum == num {
@@ -151,14 +142,14 @@ func removeSeqNum (num int, L *list) *Message{
 				L.head = nil
 				L.tail = nil
 				return tracer.msg
-			} else if (tracer.prev == nil) {
+			} else if tracer.prev == nil {
 				// first one to be removed
 				newFirst := tracer.next
 				newFirst.prev = nil
 				L.head = newFirst
 				tracer.next = nil
 				return tracer.msg
-			} else if (tracer.next == nil) {
+			} else if tracer.next == nil {
 				newLast := tracer.prev
 				newLast.next = nil
 				L.tail = newLast
