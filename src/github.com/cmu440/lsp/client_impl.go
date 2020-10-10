@@ -6,7 +6,7 @@ import (
 	//"bytes"
 	"encoding/json"
 	"errors"
-	"fmt"
+	//"fmt"
 	"github.com/cmu440/lspnet"
 	"time"
 )
@@ -52,7 +52,7 @@ type client struct {
 	timerDrop         chan bool
 	closeFinish       chan bool
 	receiveSth        chan bool
-	ackToSend         chan *Message
+	//ackToSend         chan *Message
 	connIDReq         chan bool
 	connIDAnswer      chan int
 }
@@ -106,7 +106,7 @@ func NewClient(hostport string, params *Params) (Client, error) {
 		timerDrop:         make(chan bool),
 		closeFinish:       make(chan bool),
 		receiveSth:        make(chan bool),
-		ackToSend:         make(chan *Message),
+		//ackToSend:         make(chan *Message),
 		connIDReq:         make(chan bool),
 		connIDAnswer:      make(chan int),
 	}
@@ -402,7 +402,7 @@ func (c *client) TimeRoutine() {
 			//dropConnTimer = time.NewTicker(time.Duration(c.params.EpochLimit*c.params.EpochMillis) * time.Millisecond)
 		case newElem := <-c.newWindowElem:
 			c.AddNewWindowElem(newElem)
-			fmt.Printf("sending new message %v\n", newElem.seqNum)
+			//fmt.Printf("sending new message %v\n", newElem.seqNum)
 			aliveConfirm = true
 		case sn := <-c.newAckSeqNum:
 			if sn == 0 {
@@ -415,7 +415,7 @@ func (c *client) TimeRoutine() {
 			}
 			//fmt.Printf("recieve ack for window msg %v\n", sn)
 			c.ProcessAck(sn)
-			fmt.Printf("finished processing ack for window msg %v\n",sn)
+			//fmt.Printf("finished processing ack for window msg %v\n",sn)
 			if wantQuit && (len(c.window) == 0) && (len(c.unsentBuffer) == 0) {
 				c.quitConfirm <- true
 			}
@@ -426,8 +426,6 @@ func (c *client) TimeRoutine() {
 			} else if wantQuit && (len(c.window) == 0) && (len(c.unsentBuffer) == 0) {
 				c.quitConfirm <- true
 			}
-		case ack:= <-c.ackToSend:
-			c.WriteMsg(ack)
 		}
 	}
 }
@@ -514,7 +512,8 @@ func (c *client) ReadRoutine() {
 					case MsgData:
 						if c.CheckCorrect(msg) {
 							ack := NewAck(msg.ConnID, msg.SeqNum)
-							c.ackToSend <- ack
+							c.WriteMsg(ack)
+							//c.ackToSend <- ack
 							c.incomeData <- msg
 						}
 						//fmt.Printf("incoming data received %v\n", msg.SeqNum)
