@@ -6,7 +6,7 @@ import (
 	//"bytes"
 	"encoding/json"
 	"errors"
-	"fmt"
+	//"fmt"
 	"github.com/cmu440/lspnet"
 	"time"
 )
@@ -56,7 +56,6 @@ type client struct {
 	connIDReq         chan bool
 	connIDAnswer      chan int
 	closeCalled       bool
-	timeConnIDReq     chan bool
 	timeAnswerID      chan int
 }
 
@@ -113,7 +112,6 @@ func NewClient(hostport string, params *Params) (Client, error) {
 		connIDReq:         make(chan bool),
 		connIDAnswer:      make(chan int),
 		closeCalled:       false,
-		timeConnIDReq:     make(chan bool),
 		timeAnswerID:      make(chan int),
 	}
 
@@ -139,9 +137,8 @@ func (c *client) Read() ([]byte, error) {
 	//log("-------client called read, waiting........")
 	msg := <-c.readResponse
 	c.readEmpty <- true
-	//fmt.Printf("read received message\n")
 	if msg == nil {
-		fmt.Printf("got error message\n")
+		//fmt.Printf("got error message\n")
 		return nil, errors.New("read request denied, connection failed")
 	}
 	//log("-------client called read " + msg.String())
@@ -160,7 +157,7 @@ func (c *client) Write(payload []byte) error {
 }
 
 func (c *client) Close() error {
-	fmt.Printf("client %v ready to close\n", c.connID)
+	//fmt.Printf("client %v ready to close\n", c.connID)
 	c.mainQuit <- true
 	<-c.closeFinish
 	return nil
@@ -370,6 +367,7 @@ func (c *client) TimeRoutine() {
 	disconnected := false
 	wantQuit := false
 	connectionMsg := NewConnect()
+	id := -1
 	c.WriteMsg(connectionMsg)
 	for {
 		select {
@@ -385,8 +383,6 @@ func (c *client) TimeRoutine() {
 			resendMsg := c.UpdateWindow()
 			aliveConfirm = resendMsg || aliveConfirm
 			if aliveConfirm == false {
-				c.timeConnIDReq <- true
-				id := <- c.timeAnswerID
 				c.SendConnAck(id)
 			} else {
 				aliveConfirm = false
@@ -417,6 +413,7 @@ func (c *client) TimeRoutine() {
 				if connConfirm == false {
 					connConfirm = true
 					c.connectionAck <- true
+					id = <-c.connIDAnswer
 				}
 				continue
 				//heart beat or ack
@@ -450,14 +447,14 @@ func (c *client) MainRoutine() {
 		case <-c.quitConfirm:
 			c.alreadyDisconnect = true
 			c.AbortAll()
-			fmt.Printf("Client %v terminated\n", c.connID)
+			//fmt.Printf("Client %v terminated\n", c.connID)
 			return
 		case <-c.disconnect:
 			c.alreadyDisconnect = true
 			addTerminatingElem(c.recieveList)
 			//fmt.Printf("server disconnected the client\n")
 			if (len(c.readResponse) == 0) && (c.recieveList.head.seqNum == -1) {
-				fmt.Printf("pushing error message\n")
+				//fmt.Printf("pushing error message\n")
 				c.readResponse <- nil
 			}
 		case <-c.readEmpty:
@@ -472,7 +469,7 @@ func (c *client) MainRoutine() {
 					c.readResponse <- readRes
 					c.wantedMsg += 1
 				} else if (!empty(c.recieveList)) && (c.recieveList.head.seqNum == -1) {
-					fmt.Printf("repushing error message\n")
+					//fmt.Printf("repushing error message\n")
 					c.readResponse <- nil
 				}
 			}
@@ -480,6 +477,7 @@ func (c *client) MainRoutine() {
 			if c.ackConn == 0 {
 				c.connID = ID
 				c.ackConn = 1
+				c.connIDAnswer <- c.connID
 			}
 		case msg := <-c.incomeData:
 			if c.closeCalled {
@@ -527,8 +525,6 @@ func (c *client) MainRoutine() {
 			if c.connID >= 0 {
 				c.connIDAnswer <- c.connID
 			}
-		case <- c.timeConnIDReq:
-			c.timeAnswerID <-c.connID
 		}
 	}
 }
