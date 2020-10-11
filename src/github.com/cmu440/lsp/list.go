@@ -1,3 +1,4 @@
+//the implementation for list structure
 package lsp
 
 import "fmt"
@@ -165,6 +166,7 @@ func removeSeqNum(num int, L *list) *Message {
 				return tracer.msg
 			}
 		}
+		tracer = tracer.next
 	}
 	return nil
 }
@@ -183,6 +185,24 @@ func sliceHead(L *list) *Message {
 		L.head = tmp.next
 		L.head.prev = nil
 		return tmp.msg
+	}
+}
+
+func addTerminatingElem(L *list) {
+	newNode := &node{
+		prev:   nil,
+		next:   nil,
+		seqNum: -1,
+		msg:    nil,
+	}
+	if empty(L) {
+		L.head = newNode
+		L.tail = newNode
+	} else {
+		currentLast := L.tail
+		L.tail = newNode
+		newNode.prev = currentLast
+		currentLast.next = newNode
 	}
 }
 
