@@ -224,9 +224,9 @@ func checkCorrect(m *Message) bool {
 
 //if there's extra space in the window, we move as many window elements as
 //we can from the unsent buffer
-func (c *client) SendAllAvailable() {
+func (c *client) SendAllAvailable() bool{
 	if len(c.unsentBuffer) == 0 {
-		return
+		return false
 	}
 	firstUnsent := c.unsentBuffer[0].seqNum
 	if len(c.window) == 0 {
@@ -234,18 +234,25 @@ func (c *client) SendAllAvailable() {
 		c.windowStart = firstUnsent
 		c.windowUnAcked = numSent
 		c.window = c.unsentBuffer[:numSent]
+		for _,elem := range c.window {
+			c.WriteMsg(elem.msg)
+		}
 		c.unsentBuffer = c.unsentBuffer[numSent:]
-		return
+		return true
 	} else {
 		remain := minHelper(c.params.WindowSize-(firstUnsent-c.windowStart), len(c.unsentBuffer))
 		remain = minHelper(remain, c.params.MaxUnackedMessages-c.windowUnAcked)
 		if remain <= 0 {
-			return
+			return false
 		} else {
 			newSent := c.unsentBuffer[:remain]
 			c.window = append(c.window, newSent...)
 			c.windowUnAcked += remain
+			for _,elem := range newSent {
+				c.WriteMsg(elem.msg)
+			}
 			c.unsentBuffer = c.unsentBuffer[remain:]
+			return true
 		}
 	}
 }
@@ -271,7 +278,7 @@ func (c *client) RemoveFinished() {
 
 // after receiving ack, then we mark these windows that contains the corresponding
 //messages as acked
-func (c *client) ProcessAck(sn int) {
+func (c *client) ProcessAck(sn int) bool{
 	if (c.windowStart >= 0) && (c.windowStart <= sn) {
 		idx := sn - c.windowStart
 		if c.window[idx].acked == false {
@@ -282,9 +289,14 @@ func (c *client) ProcessAck(sn int) {
 				//fmt.Printf("removing window element with index %v\n", idx)
 				c.RemoveFinished()
 			}
-			c.SendAllAvailable()
+			res :=c.SendAllAvailable()
+			return res
 			//fmt.Printf("currently there're %v number of elements in window\n", len(c.window))
+		} else {
+			return false
 		}
+	} else {
+		return false
 	}
 }
 
@@ -404,7 +416,8 @@ func (c *client) TimeRoutine() {
 				//heart beat or ack
 			}
 			//fmt.Printf("recieve ack for window msg %v\n", sn)
-			c.ProcessAck(sn)
+			sendNew :=c.ProcessAck(sn)
+			aliveConfirm = aliveConfirm || sendNew
 			//fmt.Printf("finished processing ack for window msg %v\n",sn)
 			if wantQuit && (len(c.window) == 0) && (len(c.unsentBuffer) == 0) {
 				c.quitConfirm <- true
