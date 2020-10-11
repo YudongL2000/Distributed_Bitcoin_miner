@@ -23,6 +23,7 @@ func newList() *list {
 	return newL
 }
 
+//check if the list is valid
 func listCheck(L *list) bool {
 	if L.head == nil && L.tail != nil {
 		return false
@@ -33,7 +34,7 @@ func listCheck(L *list) bool {
 	}
 	tracer := L.head
 	for tracer != nil {
-		if tracer.seqNum != tracer.msg.SeqNum {
+		if (tracer.msg != nil) && (tracer.seqNum != tracer.msg.SeqNum) {
 			return false
 		}
 		if tracer.prev != nil {
@@ -51,6 +52,7 @@ func listCheck(L *list) bool {
 	return true
 }
 
+//check if list is empty
 func empty(L *list) bool {
 	if L.head == nil && L.tail == nil {
 		return true
@@ -58,6 +60,7 @@ func empty(L *list) bool {
 	return false
 }
 
+// check if a message is in the list
 func checkPresent(msg *Message, L *list) bool {
 	if empty(L) {
 		return false
@@ -73,6 +76,7 @@ func checkPresent(msg *Message, L *list) bool {
 	}
 }
 
+//insert new message into the list and make sure it's sorted by SeqNum
 func listInsert(msg *Message, L *list) {
 	newNode := &node{
 		prev:   nil,
@@ -135,6 +139,7 @@ func listInsert(msg *Message, L *list) {
 	}
 }
 
+//remove the message with a specific SeqNum in the list
 func removeSeqNum(num int, L *list) *Message {
 	tracer := L.head
 	for tracer != nil {
@@ -171,6 +176,7 @@ func removeSeqNum(num int, L *list) *Message {
 	return nil
 }
 
+//remove the first element from the list and return the message inside
 func sliceHead(L *list) *Message {
 	if empty(L) {
 		return nil
@@ -188,6 +194,7 @@ func sliceHead(L *list) *Message {
 	}
 }
 
+//add a seqnum =-1 node to indicate a close status
 func addTerminatingElem(L *list) {
 	newNode := &node{
 		prev:   nil,
@@ -206,6 +213,7 @@ func addTerminatingElem(L *list) {
 	}
 }
 
+//print the seqnum of the list elements consequtively
 func printList(L *list) {
 	tracer := L.head
 	fmt.Printf("list elements: ")

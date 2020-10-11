@@ -11,51 +11,53 @@ import (
 
 const MaxMessageByteLen = 2000
 
-//an element in the 
+//an element in the window created from writer payload
 type sentQueueElem struct {
-	acked       bool
-	seqNum      int
-	backOff     int
-	epochPassed int
-	msg         *Message
+	acked       bool     //whether the message is acknowledged
+	seqNum      int      //seq num of the message
+	backOff     int      //current backoff needed for the next resend
+	epochPassed int      //number of epochs after the last resend
+	msg         *Message //message to send
 }
 
 type client struct {
 	params            *Params
-	connID            int
+	connID            int //connection id
 	connection        *lspnet.UDPConn
-	connectionAck     chan bool
+	connectionAck     chan bool //routine send back whether connection is acked
 	seqNum            int
-	wantedMsg         int
-	ackConn           int
-	readResponse      chan *Message
-	readEmpty         chan bool
-	window            []*sentQueueElem
-	windowStart       int
-	windowUnAcked     int
-	unsentBuffer      []*sentQueueElem
-	recieveList       *list
-	connMain          chan int
-	outgoPayload      chan []byte
-	newWindowElem     chan *sentQueueElem
-	newAckSeqNum      chan int
-	writeReq          chan bool
-	writeReturn       chan bool
-	incomeData        chan *Message
-	alreadyDisconnect bool
-	readRountineQuit  chan bool
-	mainQuit          chan bool
-	quitReqTime       chan bool
-	quitConfirm       chan bool
-	disconnect        chan bool
-	timerDrop         chan bool
-	closeFinish       chan bool
-	receiveSth        chan bool
-	connIDReq         chan bool
-	connIDAnswer      chan int
-	closeCalled       bool
-	timeAnswerID      chan int
+	wantedMsg         int                 //seqnum of next message to Read
+	ackConn           int                 //indicate whether connection is already established
+	readResponse      chan *Message       //Read function takes wanted message from this channel
+	readEmpty         chan bool           //indicate if readResponse is empty
+	window            []*sentQueueElem    //window
+	windowStart       int                 //start of window , -1 if window empty
+	windowUnAcked     int                 //unacked messages in the window
+	unsentBuffer      []*sentQueueElem    //pending messages outside window, waiting to be sent
+	recieveList       *list               //double linked list of received messages
+	connMain          chan int            //the main channel send connid to other routines
+	outgoPayload      chan []byte         //payload to be sent
+	newWindowElem     chan *sentQueueElem //new window element created by main rountine
+	newAckSeqNum      chan int            //the seqnum of new ack received by read Routine
+	writeReq          chan bool           //write Request to the server by Write function
+	writeReturn       chan bool           //confirmation for writing, if false, then write an error
+	incomeData        chan *Message       //new MsgData received by the read Routine
+	alreadyDisconnect bool                //the server is dropped
+	readRountineQuit  chan bool           //close read Routine
+	mainQuit          chan bool           //close main rountine
+	quitReqTime       chan bool           //send close request to time Rountine, waiting for all messages sent and acked
+	quitConfirm       chan bool           //all pending messages sent and acked , close available
+	disconnect        chan bool           //the client disconnected from server after time out
+	timerDrop         chan bool           //close TimeAndSend Rountine
+	closeFinish       chan bool           //all pending messages processed, Close function could return
+	serverAlive       chan bool           //received something from server, server connection is confirmed
+	connIDReq         chan bool           //ConnID function called
+	connIDAnswer      chan int            //send connection ID back to ConnID function
+	closeCalled       bool                //close has already been called, no longer acept Read, Write and Close
+	timeAnswerID      chan int            //send connection ID to TimeAndSend Rountine after connection is established
 }
+
+//===============================================  Start of client_api functions =================================
 
 // NewClient creates, initiates, and returns a new client. This function
 // should return after a connection with the server has been established
@@ -106,7 +108,7 @@ func NewClient(hostport string, params *Params) (Client, error) {
 		disconnect:        make(chan bool),
 		timerDrop:         make(chan bool),
 		closeFinish:       make(chan bool),
-		receiveSth:        make(chan bool),
+		serverAlive:       make(chan bool),
 		connIDReq:         make(chan bool),
 		connIDAnswer:      make(chan int),
 		closeCalled:       false,
@@ -115,7 +117,7 @@ func NewClient(hostport string, params *Params) (Client, error) {
 
 	go c.ReadRoutine()
 	go c.MainRoutine()
-	go c.TimeRoutine()
+	go c.TimeAndSendRoutine()
 	connectedInfo := <-c.connectionAck
 	if connectedInfo == false {
 		c.Close()
@@ -156,13 +158,16 @@ func (c *client) Close() error {
 	return nil
 }
 
+//=============================================== End of client_api functions =============================
+
+//============================================ Start of generic Helper functions =======================
 //send a heart beat to server
 func (c *client) SendConnAck(id int) {
 	msg := NewAck(id, 0)
 	c.WriteMsg(msg)
 }
 
-//calculate the min of 2 integers 
+//calculate the min of 2 integers
 func minHelper(a int, b int) int {
 	if a >= b {
 		return b
@@ -185,7 +190,21 @@ func (c *client) WriteMsg(msg *Message) error {
 	}
 }
 
+//store the message information in a double linked list
+func (c *client) StoreData(msg *Message) {
+	listInsert(msg, c.recieveList)
+}
 
+//Terminate all go rountines and disconnect from the server
+func (c *client) AbortAll() {
+	c.connection.Close()
+	c.timerDrop <- true
+	c.readRountineQuit <- true
+	c.closeFinish <- true
+	return
+}
+
+//============================================= End of Generic Helper Functions ==============================
 
 //================================================= Start of window functions ================================
 
@@ -265,7 +284,6 @@ func (c *client) ProcessAck(sn int) bool {
 	}
 }
 
-// add a new window element to the window
 //immediately send once after sending
 func (c *client) AddNewWindowElem(newElem *sentQueueElem) {
 	if len(c.window) == 0 {
@@ -310,48 +328,39 @@ func (c *client) UpdateWindow() bool {
 
 //=========================================== End of window functions =====================================
 
-//store the message information in a double linked list
-func (c *client) StoreData(msg *Message) {
-	listInsert(msg, c.recieveList)
-}
-
-func (c *client) AbortAll() {
-	c.connection.Close()
-	c.timerDrop <- true
-	c.readRountineQuit <- true
-	c.closeFinish <- true
-	return
-}
-
-func (c *client) TimeRoutine() {
+//=========================================== Start of Rountines ==========================================
+func (c *client) TimeAndSendRoutine() {
 	heartBeatTimer := time.NewTicker(time.Duration(c.params.EpochMillis) * time.Millisecond)
 	dropConnTimer := time.NewTicker(time.Duration(c.params.EpochLimit*c.params.EpochMillis) * time.Millisecond)
 	aliveConfirm := false
 	connConfirm := false
 	disconnected := false
 	wantQuit := false
-	connectionMsg := NewConnect()
 	id := -1
-	c.WriteMsg(connectionMsg)
+	newConnElem := &sentQueueElem{
+		acked:   false,
+		seqNum:  0,
+		backOff: 0,
+		msg:     NewConnect(),
+	}
+	c.AddNewWindowElem(newConnElem)
 	for {
 		select {
 		case <-heartBeatTimer.C:
+			//refresh epoch timer
 			heartBeatTimer = time.NewTicker(time.Duration(c.params.EpochMillis) * time.Millisecond)
 			if disconnected {
 				continue
 			}
-			if connConfirm == false {
-				c.WriteMsg(connectionMsg)
-				continue
-			}
 			resendMsg := c.UpdateWindow()
+			// see if new window messsages are sent window
 			aliveConfirm = resendMsg || aliveConfirm
-			if aliveConfirm == false {
+			if aliveConfirm == false && connConfirm {
 				c.SendConnAck(id)
-			} else {
-				aliveConfirm = false
+				// no message sent in the last epoch, send a heart beat indicating connection
 			}
 		case <-dropConnTimer.C:
+			// Max epochs passed, no messages received
 			if connConfirm == false {
 				c.connectionAck <- false
 				disconnected = true
@@ -365,25 +374,30 @@ func (c *client) TimeRoutine() {
 				}
 			}
 		case <-c.timerDrop:
+			//quit rountine
 			return
-		case <-c.receiveSth:
+		case <-c.serverAlive:
+			//received something from the server, reset the timeout Timer
 			dropConnTimer = time.NewTicker(time.Duration(c.params.EpochLimit*c.params.EpochMillis) * time.Millisecond)
-		case newElem := <-c.newWindowElem:
+		case newElem := <-c.newWindowElem: // add new element to the window
 			c.AddNewWindowElem(newElem)
 			aliveConfirm = true
 		case sn := <-c.newAckSeqNum:
+			//new ack recieved
+			// see if new  messsages are placed into the window and sent
+			sendNew := c.ProcessAck(sn)
+			aliveConfirm = aliveConfirm || sendNew
 			if sn == 0 {
 				if connConfirm == false {
+					//connection ack
 					connConfirm = true
 					c.connectionAck <- true
 					id = <-c.connIDAnswer
 				}
 				continue
-				//heart beat or ack
 			}
-			sendNew := c.ProcessAck(sn)
-			aliveConfirm = aliveConfirm || sendNew
 			if wantQuit && (len(c.window) == 0) && (len(c.unsentBuffer) == 0) {
+				//all messages sent out, ready to close client
 				c.quitConfirm <- true
 			}
 		case <-c.quitReqTime:
@@ -391,31 +405,37 @@ func (c *client) TimeRoutine() {
 			if disconnected {
 				c.quitConfirm <- true
 			} else if wantQuit && (len(c.window) == 0) && (len(c.unsentBuffer) == 0) {
+				//all messages sent out, ready to close client
 				c.quitConfirm <- true
 			}
 		}
 	}
 }
 
+//Main Rountine of the client
 func (c *client) MainRoutine() {
 	for {
 		select {
 		case <-c.mainQuit:
+			//Close called
 			if c.closeCalled == false {
 				c.quitReqTime <- true
 				c.closeCalled = true
 			}
 		case <-c.quitConfirm:
+			//all pending messages sent out, ready for close
 			c.alreadyDisconnect = true
 			c.AbortAll()
 			return
 		case <-c.disconnect:
+			//connection timed out from server
 			c.alreadyDisconnect = true
 			addTerminatingElem(c.recieveList)
 			if (len(c.readResponse) == 0) && (c.recieveList.head.seqNum == -1) {
 				c.readResponse <- nil
 			}
 		case <-c.readEmpty:
+			//last read function finished, buffered channel empty
 			if c.closeCalled {
 				continue
 			}
@@ -425,16 +445,19 @@ func (c *client) MainRoutine() {
 					c.readResponse <- readRes
 					c.wantedMsg += 1
 				} else if (!empty(c.recieveList)) && (c.recieveList.head.seqNum == -1) {
+					//Read should send out error message
 					c.readResponse <- nil
 				}
 			}
 		case ID := <-c.connMain:
+			//connection established
 			if c.ackConn == 0 {
 				c.connID = ID
 				c.ackConn = 1
 				c.connIDAnswer <- c.connID
 			}
 		case msg := <-c.incomeData:
+			//new data message received
 			if c.closeCalled {
 				continue
 			}
@@ -451,6 +474,7 @@ func (c *client) MainRoutine() {
 				}
 			}
 		case payload := <-c.outgoPayload:
+			//new payload to be sent
 			if c.closeCalled {
 				continue
 			}
@@ -473,6 +497,7 @@ func (c *client) MainRoutine() {
 				c.writeReturn <- true
 			}
 		case <-c.connIDReq:
+			//ConnID function called
 			if c.connID >= 0 {
 				c.connIDAnswer <- c.connID
 			}
@@ -507,7 +532,7 @@ func (c *client) ReadRoutine() {
 						}
 						c.newAckSeqNum <- msg.SeqNum
 					}
-					c.receiveSth <- true
+					c.serverAlive <- true
 				}
 			}
 		}

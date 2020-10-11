@@ -3,7 +3,7 @@
 
 package lsp
 
-//calculate the value of checksum from different attributes of a message 
+//calculate the value of checksum from different attributes of a message
 func message2CheckSum(ID int, seqNum int, size int, payload []byte) uint16 {
 	var checksumTmp uint32
 	var mask uint32
