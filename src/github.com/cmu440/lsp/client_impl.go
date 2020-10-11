@@ -56,6 +56,8 @@ type client struct {
 	connIDReq         chan bool
 	connIDAnswer      chan int
 	closeCalled       bool
+	timeConnIDReq     chan bool
+	timeAnswerID      chan int
 }
 
 // NewClient creates, initiates, and returns a new client. This function
@@ -111,6 +113,8 @@ func NewClient(hostport string, params *Params) (Client, error) {
 		connIDReq:         make(chan bool),
 		connIDAnswer:      make(chan int),
 		closeCalled:       false,
+		timeConnIDReq:     make(chan bool),
+		timeAnswerID:      make(chan int),
 	}
 
 	go c.ReadRoutine()
@@ -162,8 +166,8 @@ func (c *client) Close() error {
 	return nil
 }
 
-func (c *client) SendConnAck() {
-	msg := NewAck(c.connID, 0)
+func (c *client) SendConnAck(id int) {
+	msg := NewAck(id, 0)
 	c.WriteMsg(msg)
 }
 
@@ -381,7 +385,9 @@ func (c *client) TimeRoutine() {
 			resendMsg := c.UpdateWindow()
 			aliveConfirm = resendMsg || aliveConfirm
 			if aliveConfirm == false {
-				c.SendConnAck()
+				c.timeConnIDReq <- true
+				id := <- c.timeAnswerID
+				c.SendConnAck(id)
 			} else {
 				aliveConfirm = false
 			}
@@ -521,6 +527,8 @@ func (c *client) MainRoutine() {
 			if c.connID >= 0 {
 				c.connIDAnswer <- c.connID
 			}
+		case <- c.timeConnIDReq:
+			c.timeAnswerID <-c.connID
 		}
 	}
 }
