@@ -1,5 +1,6 @@
 package lsp
 
+import "fmt"
 
 type node struct {
 	prev   *node
@@ -166,4 +167,31 @@ func removeSeqNum(num int, L *list) *Message {
 		}
 	}
 	return nil
+}
+
+func sliceHead(L *list) *Message {
+	if empty(L) {
+		return nil
+	} else if (L.head == L.tail) && (L.head != nil) {
+		//one element in list
+		tmp := L.head
+		L.head = nil
+		L.tail = nil
+		return tmp.msg
+	} else {
+		tmp := L.head
+		L.head = tmp.next
+		L.head.prev = nil
+		return tmp.msg
+	}
+}
+
+func printList(L *list) {
+	tracer := L.head
+	fmt.Printf("list elements: ")
+	for tracer != nil {
+		fmt.Printf("%v ", tracer.seqNum)
+		tracer = tracer.next
+	}
+	fmt.Printf("\n")
 }

@@ -23,19 +23,20 @@ type sentQueueElem struct {
 }
 
 type client struct {
-	params            *Params
-	connID            int
-	connection        *lspnet.UDPConn
-	connectionAck     chan bool
-	seqNum            int
-	wantedMsg         int
-	ackConn           int
-	readResponse      chan *Message
-	window            []*sentQueueElem
-	windowStart       int
-	windowUnAcked     int
-	unsentBuffer      []*sentQueueElem
-	receivedMsg       []*Message
+	params        *Params
+	connID        int
+	connection    *lspnet.UDPConn
+	connectionAck chan bool
+	seqNum        int
+	wantedMsg     int
+	ackConn       int
+	readResponse  chan *Message
+	window        []*sentQueueElem
+	windowStart   int
+	windowUnAcked int
+	unsentBuffer  []*sentQueueElem
+	//receivedMsg       []*Message
+	recieveList       *list
 	connMain          chan int
 	outgoPayload      chan []byte
 	newWindowElem     chan *sentQueueElem
@@ -52,9 +53,9 @@ type client struct {
 	timerDrop         chan bool
 	closeFinish       chan bool
 	receiveSth        chan bool
-	//ackToSend         chan *Message
-	connIDReq         chan bool
-	connIDAnswer      chan int
+	//ackToSend       chan *Message
+	connIDReq    chan bool
+	connIDAnswer chan int
 }
 
 // NewClient creates, initiates, and returns a new client. This function
@@ -77,19 +78,20 @@ func NewClient(hostport string, params *Params) (Client, error) {
 		return nil, connError
 	}
 	c := &client{
-		params:            params,
-		connID:            -1,
-		connection:        conn,
-		connectionAck:     make(chan bool),
-		seqNum:            1,
-		wantedMsg:         1,
-		ackConn:           0,
-		readResponse:      make(chan *Message),
-		window:            nil,
-		windowStart:       0,
-		windowUnAcked:     0,
-		unsentBuffer:      nil,
-		receivedMsg:       nil,
+		params:        params,
+		connID:        -1,
+		connection:    conn,
+		connectionAck: make(chan bool),
+		seqNum:        1,
+		wantedMsg:     1,
+		ackConn:       0,
+		readResponse:  make(chan *Message),
+		window:        nil,
+		windowStart:   0,
+		windowUnAcked: 0,
+		unsentBuffer:  nil,
+		//receivedMsg:       nil,
+		recieveList:       newList(),
 		connMain:          make(chan int),
 		outgoPayload:      make(chan []byte),
 		newWindowElem:     make(chan *sentQueueElem),
@@ -107,8 +109,8 @@ func NewClient(hostport string, params *Params) (Client, error) {
 		closeFinish:       make(chan bool),
 		receiveSth:        make(chan bool),
 		//ackToSend:         make(chan *Message),
-		connIDReq:         make(chan bool),
-		connIDAnswer:      make(chan int),
+		connIDReq:    make(chan bool),
+		connIDAnswer: make(chan int),
 	}
 
 	go c.ReadRoutine()
@@ -125,7 +127,7 @@ func NewClient(hostport string, params *Params) (Client, error) {
 
 func (c *client) ConnID() int {
 	c.connIDReq <- true
-	answer := <- c.connIDAnswer
+	answer := <-c.connIDAnswer
 	return answer
 }
 
@@ -156,7 +158,6 @@ func (c *client) Close() error {
 }
 
 //================================================= End of api Functions ====================================
-
 
 func (c *client) SendConnAck() {
 	msg := NewAck(c.connID, 0)
@@ -262,7 +263,7 @@ func (c *client) RemoveFinished() {
 }
 
 func (c *client) ProcessAck(sn int) {
-	if (c.windowStart >=0) && (c.windowStart <= sn) {
+	if (c.windowStart >= 0) && (c.windowStart <= sn) {
 		idx := sn - c.windowStart
 		if c.window[idx].acked == false {
 			//c.window[idx].sentSuccess <- true
@@ -320,24 +321,60 @@ func (c *client) UpdateWindow() bool {
 }
 
 //=========================================== End of window functions =====================================
-
-func (c *client) StoreData(msg *Message) {
-	var idx int
-	idx = -1
-	for j, m := range c.receivedMsg {
-		if m.SeqNum == msg.SeqNum {
-			return
-		} else if m.SeqNum > msg.SeqNum {
-			idx = j
-			break
+/*
+func (c *client)insertionIdx(sn int) int {
+	for j,m := range c.receivedMsg {
+		if m.SeqNum >= sn {
+			return j
 		}
 	}
+	return -1
+}
+
+func (c *client) printList () {
+	for j,m := range(c.receivedMsg) {
+		if j<len(c.receivedMsg)-1 {
+			fmt.Printf("%v ", m.SeqNum)
+		} else {
+			fmt.Printf("%v\n",m.SeqNum)
+		}
+	}
+}
+
+func (c *client) StoreData(msg *Message) {
+	fmt.Printf("before insertion: ")
+	c.printList()
+	if len(c.receivedMsg) == 0 {
+		c.receivedMsg = append(c.receivedMsg, msg)
+		fmt.Printf("after insertion: ")
+		c.printList()
+		return
+	} else if (c.receivedMsg[len(c.receivedMsg)-1].SeqNum < msg.SeqNum) {
+		c.receivedMsg = append(c.receivedMsg, msg)
+		fmt.Printf("after insertion: ")
+		c.printList()
+		return
+	}
+	idx := c.insertionIdx(msg.SeqNum)
+	fmt.Printf("index: %v\n", idx)
+	if c.receivedMsg[idx].SeqNum == msg.SeqNum {
+		fmt.Printf("after insertion: ")
+		c.printList()
+		return
+	}
 	if idx >= 0 {
-		c.receivedMsg = append(append(c.receivedMsg[:idx], msg), c.receivedMsg[idx:]...)
+		c.receivedMsg = append(c.receivedMsg[idx+1:], c.receivedMsg[:idx]...)
+		c.receivedMsg[idx] = msg
 	} else {
 		c.receivedMsg = append(c.receivedMsg, msg)
 	}
+	fmt.Printf("after insertion: ")
+	c.printList()
 	return
+}
+*/
+func (c *client) StoreData(msg *Message) {
+	listInsert(msg, c.recieveList)
 }
 
 func (c *client) AbortAll() {
@@ -432,17 +469,32 @@ func (c *client) TimeRoutine() {
 
 func (c *client) MainRoutine() {
 	for {
-		if len(c.receivedMsg) > 0 {
-			if c.receivedMsg[0].SeqNum == c.wantedMsg {
-				readRes := c.receivedMsg[0]
-				c.receivedMsg = c.receivedMsg[1:]
+		/*
+			if len(c.receivedMsg) > 0 {
+				if c.receivedMsg[0].SeqNum == c.wantedMsg {
+					fmt.Printf("wanted %v\n", c.wantedMsg)
+					fmt.Printf("first msg %v\n", c.receivedMsg[0].SeqNum)
+					readRes := c.receivedMsg[0]
+					c.receivedMsg = c.receivedMsg[1:]
+					c.readResponse <- readRes
+					c.wantedMsg += 1
+				} else if c.alreadyDisconnect {
+					c.readResponse <- nil
+				}
+			} else if c.alreadyDisconnect {
+				c.readResponse <- nil
+			}*/
+		//printList(c.recieveList)
+		if (len(c.readResponse) == 0) {
+			if (!empty(c.recieveList)) && (c.recieveList.head.seqNum == c.wantedMsg) {
+				readRes := sliceHead(c.recieveList)
 				c.readResponse <- readRes
-				c.wantedMsg += 1
+				//fmt.Printf("info matched %v\n", c.wantedMsg)
+				//printList(c.recieveList)
+				c.wantedMsg +=1 
 			} else if c.alreadyDisconnect {
 				c.readResponse <- nil
 			}
-		} else if c.alreadyDisconnect {
-			c.readResponse <- nil
 		}
 		select {
 		case <-c.mainQuit:
@@ -465,6 +517,7 @@ func (c *client) MainRoutine() {
 				continue
 			} else {
 				c.StoreData(msg)
+				//printList(c.recieveList)
 			}
 		case payload := <-c.outgoPayload:
 			//fmt.Printf("have payload to send")
@@ -487,7 +540,7 @@ func (c *client) MainRoutine() {
 				c.writeReturn <- true
 			}
 		case <-c.connIDReq:
-			if c.connID >=0 {
+			if c.connID >= 0 {
 				c.connIDAnswer <- c.connID
 			}
 		}
