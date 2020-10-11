@@ -3,23 +3,21 @@
 package lsp
 
 import (
-	//"bytes"
 	"encoding/json"
 	"errors"
-	//"fmt"
 	"github.com/cmu440/lspnet"
 	"time"
 )
 
-const MaxMessgeByteLen = 2000
+const MaxMessageByteLen = 2000
 
+//an element in the 
 type sentQueueElem struct {
 	acked       bool
 	seqNum      int
 	backOff     int
 	epochPassed int
 	msg         *Message
-	//sentSuccess chan bool
 }
 
 type client struct {
@@ -123,7 +121,6 @@ func NewClient(hostport string, params *Params) (Client, error) {
 		c.Close()
 		return nil, errors.New("connection failed")
 	}
-	//fmt.Printf("connection acknowledged\n")
 	return c, nil
 }
 
@@ -134,14 +131,11 @@ func (c *client) ConnID() int {
 }
 
 func (c *client) Read() ([]byte, error) {
-	//log("-------client called read, waiting........")
 	msg := <-c.readResponse
 	c.readEmpty <- true
 	if msg == nil {
-		//fmt.Printf("got error message\n")
 		return nil, errors.New("read request denied, connection failed")
 	}
-	//log("-------client called read " + msg.String())
 	return msg.Payload, nil
 }
 
@@ -157,17 +151,18 @@ func (c *client) Write(payload []byte) error {
 }
 
 func (c *client) Close() error {
-	//fmt.Printf("client %v ready to close\n", c.connID)
 	c.mainQuit <- true
 	<-c.closeFinish
 	return nil
 }
 
+//send a heart beat to server
 func (c *client) SendConnAck(id int) {
 	msg := NewAck(id, 0)
 	c.WriteMsg(msg)
 }
 
+//calculate the min of 2 integers 
 func minHelper(a int, b int) int {
 	if a >= b {
 		return b
@@ -176,8 +171,8 @@ func minHelper(a int, b int) int {
 	}
 }
 
+//write a message to the server through connection
 func (c *client) WriteMsg(msg *Message) error {
-	//log("client write " + msg.String())
 	content, err := json.Marshal(msg)
 	if err != nil {
 		return err
@@ -190,42 +185,13 @@ func (c *client) WriteMsg(msg *Message) error {
 	}
 }
 
-func message2CheckSum(ID int, seqNum int, size int, payload []byte) uint16 {
-	var checksumTmp uint32
-	var mask uint32
-	mask = 0x0000ffff
-	checksumTmp = 0
-	checksumTmp += Int2Checksum(ID)
-	checksumTmp += Int2Checksum(seqNum)
-	checksumTmp += Int2Checksum(size)
-	checksumTmp += ByteArray2Checksum(payload)
-	for checksumTmp > 0xffff {
-		curSum := checksumTmp >> 16
-		remain := checksumTmp & mask
-		checksumTmp = curSum + remain
-	}
-	return uint16(checksumTmp)
-}
 
-func checkCorrect(m *Message) bool {
-	actualLen := len(m.Payload)
-	wantedLen := m.Size
-	usefulPayload := m.Payload
-	if actualLen >= wantedLen {
-		usefulPayload = m.Payload[:wantedLen]
-		m.Payload = usefulPayload
-	}
-	if message2CheckSum(m.ConnID, m.SeqNum, m.Size, usefulPayload) != m.Checksum {
-		return false
-	}
-	return true
-}
 
 //================================================= Start of window functions ================================
 
 //if there's extra space in the window, we move as many window elements as
 //we can from the unsent buffer
-func (c *client) SendAllAvailable() bool{
+func (c *client) SendAllAvailable() bool {
 	if len(c.unsentBuffer) == 0 {
 		return false
 	}
@@ -235,7 +201,7 @@ func (c *client) SendAllAvailable() bool{
 		c.windowStart = firstUnsent
 		c.windowUnAcked = numSent
 		c.window = c.unsentBuffer[:numSent]
-		for _,elem := range c.window {
+		for _, elem := range c.window {
 			c.WriteMsg(elem.msg)
 		}
 		c.unsentBuffer = c.unsentBuffer[numSent:]
@@ -249,7 +215,7 @@ func (c *client) SendAllAvailable() bool{
 			newSent := c.unsentBuffer[:remain]
 			c.window = append(c.window, newSent...)
 			c.windowUnAcked += remain
-			for _,elem := range newSent {
+			for _, elem := range newSent {
 				c.WriteMsg(elem.msg)
 			}
 			c.unsentBuffer = c.unsentBuffer[remain:]
@@ -279,7 +245,7 @@ func (c *client) RemoveFinished() {
 
 // after receiving ack, then we mark these windows that contains the corresponding
 //messages as acked
-func (c *client) ProcessAck(sn int) bool{
+func (c *client) ProcessAck(sn int) bool {
 	if (c.windowStart >= 0) && (c.windowStart <= sn) {
 		idx := sn - c.windowStart
 		if c.window[idx].acked == false {
@@ -287,12 +253,10 @@ func (c *client) ProcessAck(sn int) bool{
 			c.window[idx].acked = true
 			c.windowUnAcked = c.windowUnAcked - 1
 			if idx == 0 {
-				//fmt.Printf("removing window element with index %v\n", idx)
 				c.RemoveFinished()
 			}
-			res :=c.SendAllAvailable()
+			res := c.SendAllAvailable()
 			return res
-			//fmt.Printf("currently there're %v number of elements in window\n", len(c.window))
 		} else {
 			return false
 		}
@@ -406,7 +370,6 @@ func (c *client) TimeRoutine() {
 			dropConnTimer = time.NewTicker(time.Duration(c.params.EpochLimit*c.params.EpochMillis) * time.Millisecond)
 		case newElem := <-c.newWindowElem:
 			c.AddNewWindowElem(newElem)
-			//fmt.Printf("sending new message %v\n", newElem.seqNum)
 			aliveConfirm = true
 		case sn := <-c.newAckSeqNum:
 			if sn == 0 {
@@ -418,10 +381,8 @@ func (c *client) TimeRoutine() {
 				continue
 				//heart beat or ack
 			}
-			//fmt.Printf("recieve ack for window msg %v\n", sn)
-			sendNew :=c.ProcessAck(sn)
+			sendNew := c.ProcessAck(sn)
 			aliveConfirm = aliveConfirm || sendNew
-			//fmt.Printf("finished processing ack for window msg %v\n",sn)
 			if wantQuit && (len(c.window) == 0) && (len(c.unsentBuffer) == 0) {
 				c.quitConfirm <- true
 			}
@@ -447,29 +408,23 @@ func (c *client) MainRoutine() {
 		case <-c.quitConfirm:
 			c.alreadyDisconnect = true
 			c.AbortAll()
-			//fmt.Printf("Client %v terminated\n", c.connID)
 			return
 		case <-c.disconnect:
 			c.alreadyDisconnect = true
 			addTerminatingElem(c.recieveList)
-			//fmt.Printf("server disconnected the client\n")
 			if (len(c.readResponse) == 0) && (c.recieveList.head.seqNum == -1) {
-				//fmt.Printf("pushing error message\n")
 				c.readResponse <- nil
 			}
 		case <-c.readEmpty:
 			if c.closeCalled {
 				continue
 			}
-			//fmt.Printf("read channel empty!\n")
-			//printList(c.recieveList)
 			if len(c.readResponse) == 0 {
 				if (!empty(c.recieveList)) && (c.recieveList.head.seqNum == c.wantedMsg) {
 					readRes := sliceHead(c.recieveList)
 					c.readResponse <- readRes
 					c.wantedMsg += 1
 				} else if (!empty(c.recieveList)) && (c.recieveList.head.seqNum == -1) {
-					//fmt.Printf("repushing error message\n")
 					c.readResponse <- nil
 				}
 			}
@@ -485,13 +440,10 @@ func (c *client) MainRoutine() {
 			}
 			if msg.SeqNum >= c.wantedMsg {
 				c.StoreData(msg)
-				//printList(c.recieveList)
 				if len(c.readResponse) == 0 {
 					if (!empty(c.recieveList)) && (c.recieveList.head.seqNum == c.wantedMsg) {
 						readRes := sliceHead(c.recieveList)
 						c.readResponse <- readRes
-						//fmt.Printf("info matched %v\n", c.wantedMsg)
-						//printList(c.recieveList)
 						c.wantedMsg += 1
 					} else if (!empty(c.recieveList)) && (c.recieveList.head.seqNum == -1) {
 						c.readResponse <- nil
@@ -502,7 +454,6 @@ func (c *client) MainRoutine() {
 			if c.closeCalled {
 				continue
 			}
-			//fmt.Printf("have payload to send")
 			payloadSize := len(payload)
 			checkSum := message2CheckSum(c.connID, c.seqNum, payloadSize, payload)
 			m := NewData(c.connID, c.seqNum, payloadSize, payload, checkSum)
@@ -536,26 +487,21 @@ func (c *client) ReadRoutine() {
 		case <-c.readRountineQuit:
 			return
 		default:
-			var b [MaxMessgeByteLen]byte
+			var b [MaxMessageByteLen]byte
 			realLen, err := c.connection.Read(b[:])
 			if err == nil {
-				//fmt.Printf("\nreceived server\n")
 				var newMsg Message
 				errMarshal := json.Unmarshal(b[:realLen], &newMsg)
 				msg := &newMsg
-				//log("client read " + msg.String())
 				if errMarshal == nil {
 					switch msg.Type {
 					case MsgData:
 						if checkCorrect(msg) {
 							ack := NewAck(msg.ConnID, msg.SeqNum)
 							c.WriteMsg(ack)
-							//c.ackToSend <- ack
 							c.incomeData <- msg
 						}
-						//fmt.Printf("incoming data received %v\n", msg.SeqNum)
 					case MsgAck:
-						//fmt.Printf("incoming acknowledge for request %v\n", msg.SeqNum)
 						if msg.SeqNum == 0 {
 							c.connMain <- msg.ConnID
 						}
