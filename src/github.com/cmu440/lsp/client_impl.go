@@ -55,6 +55,7 @@ type client struct {
 	receiveSth        chan bool
 	connIDReq         chan bool
 	connIDAnswer      chan int
+	closeCalled       bool
 }
 
 // NewClient creates, initiates, and returns a new client. This function
@@ -109,6 +110,7 @@ func NewClient(hostport string, params *Params) (Client, error) {
 		receiveSth:        make(chan bool),
 		connIDReq:         make(chan bool),
 		connIDAnswer:      make(chan int),
+		closeCalled:       false,
 	}
 
 	go c.ReadRoutine()
@@ -130,16 +132,15 @@ func (c *client) ConnID() int {
 }
 
 func (c *client) Read() ([]byte, error) {
-	// TODO: remove this line when you are ready to begin implementing this method.
-	log("-------client called read, waiting........")
+	//log("-------client called read, waiting........")
 	msg := <-c.readResponse
 	c.readEmpty <- true
-	fmt.Printf("read received message\n")
+	//fmt.Printf("read received message\n")
 	if msg == nil {
 		fmt.Printf("got error message\n")
 		return nil, errors.New("read request denied, connection failed")
 	}
-	log("-------client called read " + msg.String())
+	//log("-------client called read " + msg.String())
 	return msg.Payload, nil
 }
 
@@ -155,6 +156,7 @@ func (c *client) Write(payload []byte) error {
 }
 
 func (c *client) Close() error {
+	fmt.Printf("client %v ready to close\n", c.connID)
 	c.mainQuit <- true
 	<-c.closeFinish
 	return nil
@@ -187,7 +189,7 @@ func (c *client) WriteMsg(msg *Message) error {
 	}
 }
 
-func Message2CheckSum(ID int, seqNum int, size int, payload []byte) uint16 {
+func message2CheckSum(ID int, seqNum int, size int, payload []byte) uint16 {
 	var checksumTmp uint32
 	var mask uint32
 	mask = 0x0000ffff
@@ -204,18 +206,17 @@ func Message2CheckSum(ID int, seqNum int, size int, payload []byte) uint16 {
 	return uint16(checksumTmp)
 }
 
-func (c *client) CheckCorrect(m *Message) bool {
-	/*
-		actualLen := len(m.Payload)
-		wantedLen := m.Size
-		usefulPayload := m.Payload
-		if actualLen >= wantedLen {
-			usefulPayload = m.Payload[:wantedLen]
-		}
-		if Message2CheckSum(m.ConnID, m.SeqNum, m.Size, usefulPayload) != m.Checksum {
-			return false
-		}
-	*/
+func checkCorrect(m *Message) bool {
+	actualLen := len(m.Payload)
+	wantedLen := m.Size
+	usefulPayload := m.Payload
+	if actualLen >= wantedLen {
+		usefulPayload = m.Payload[:wantedLen]
+		m.Payload = usefulPayload
+	}
+	if message2CheckSum(m.ConnID, m.SeqNum, m.Size, usefulPayload) != m.Checksum {
+		return false
+	}
 	return true
 }
 
@@ -287,7 +288,7 @@ func (c *client) ProcessAck(sn int) {
 	}
 }
 
-// add a new window element to the window 
+// add a new window element to the window
 //immediately send once after sending
 func (c *client) AddNewWindowElem(newElem *sentQueueElem) {
 	if len(c.window) == 0 {
@@ -423,29 +424,36 @@ func (c *client) MainRoutine() {
 	for {
 		select {
 		case <-c.mainQuit:
-			c.quitReqTime <- true
+			if c.closeCalled == false {
+				c.quitReqTime <- true
+				c.closeCalled = true
+			}
 		case <-c.quitConfirm:
 			c.alreadyDisconnect = true
 			c.AbortAll()
+			fmt.Printf("Client %v terminated\n", c.connID)
 			return
 		case <-c.disconnect:
 			c.alreadyDisconnect = true
 			addTerminatingElem(c.recieveList)
-			fmt.Printf("server disconnected the client\n")
-			if (len(c.readResponse)==0) && (c.recieveList.head.seqNum == -1) {
+			//fmt.Printf("server disconnected the client\n")
+			if (len(c.readResponse) == 0) && (c.recieveList.head.seqNum == -1) {
 				fmt.Printf("pushing error message\n")
 				c.readResponse <- nil
 			}
 		case <-c.readEmpty:
-			fmt.Printf("read channel empty!\n")
-			printList(c.recieveList)
+			if c.closeCalled {
+				continue
+			}
+			//fmt.Printf("read channel empty!\n")
+			//printList(c.recieveList)
 			if len(c.readResponse) == 0 {
 				if (!empty(c.recieveList)) && (c.recieveList.head.seqNum == c.wantedMsg) {
 					readRes := sliceHead(c.recieveList)
 					c.readResponse <- readRes
 					c.wantedMsg += 1
 				} else if (!empty(c.recieveList)) && (c.recieveList.head.seqNum == -1) {
-					fmt.Printf("repushing nil\n")
+					fmt.Printf("repushing error message\n")
 					c.readResponse <- nil
 				}
 			}
@@ -455,6 +463,9 @@ func (c *client) MainRoutine() {
 				c.ackConn = 1
 			}
 		case msg := <-c.incomeData:
+			if c.closeCalled {
+				continue
+			}
 			if msg.SeqNum >= c.wantedMsg {
 				c.StoreData(msg)
 				//printList(c.recieveList)
@@ -471,9 +482,12 @@ func (c *client) MainRoutine() {
 				}
 			}
 		case payload := <-c.outgoPayload:
+			if c.closeCalled {
+				continue
+			}
 			//fmt.Printf("have payload to send")
 			payloadSize := len(payload)
-			checkSum := Message2CheckSum(c.connID, c.seqNum, payloadSize, payload)
+			checkSum := message2CheckSum(c.connID, c.seqNum, payloadSize, payload)
 			m := NewData(c.connID, c.seqNum, payloadSize, payload, checkSum)
 			c.seqNum += 1
 			newElem := &sentQueueElem{
@@ -485,7 +499,7 @@ func (c *client) MainRoutine() {
 			}
 			c.newWindowElem <- newElem
 		case <-c.writeReq:
-			if c.alreadyDisconnect {
+			if c.alreadyDisconnect || c.closeCalled {
 				c.writeReturn <- false
 			} else {
 				c.writeReturn <- true
@@ -516,7 +530,7 @@ func (c *client) ReadRoutine() {
 				if errMarshal == nil {
 					switch msg.Type {
 					case MsgData:
-						if c.CheckCorrect(msg) {
+						if checkCorrect(msg) {
 							ack := NewAck(msg.ConnID, msg.SeqNum)
 							c.WriteMsg(ack)
 							//c.ackToSend <- ack
