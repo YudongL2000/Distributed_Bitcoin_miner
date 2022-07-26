@@ -54,7 +54,6 @@ type client struct {
 	connIDReq         chan bool           //ConnID function called
 	connIDAnswer      chan int            //send connection ID back to ConnID function
 	closeCalled       bool                //close has already been called, no longer acept Read, Write and Close
-	timeAnswerID      chan int            //send connection ID to TimeAndSend Rountine after connection is established
 }
 
 //===============================================  Start of client_api functions =================================
@@ -112,12 +111,11 @@ func NewClient(hostport string, params *Params) (Client, error) {
 		connIDReq:         make(chan bool),
 		connIDAnswer:      make(chan int),
 		closeCalled:       false,
-		timeAnswerID:      make(chan int),
 	}
 
-	go c.ReadRoutine()
-	go c.MainRoutine()
-	go c.TimeAndSendRoutine()
+	go c.readRoutine()
+	go c.mainRoutine()
+	go c.timeAndSendRountine()
 	connectedInfo := <-c.connectionAck
 	if connectedInfo == false {
 		c.Close()
@@ -162,9 +160,9 @@ func (c *client) Close() error {
 
 //============================================ Start of generic Helper functions =======================
 //send a heart beat to server
-func (c *client) SendConnAck(id int) {
+func (c *client) sendConnAck(id int) {
 	msg := NewAck(id, 0)
-	c.WriteMsg(msg)
+	c.writeMsg(msg)
 }
 
 //calculate the min of 2 integers
@@ -177,7 +175,7 @@ func minHelper(a int, b int) int {
 }
 
 //write a message to the server through connection
-func (c *client) WriteMsg(msg *Message) error {
+func (c *client) writeMsg(msg *Message) error {
 	content, err := json.Marshal(msg)
 	if err != nil {
 		return err
@@ -191,12 +189,12 @@ func (c *client) WriteMsg(msg *Message) error {
 }
 
 //store the message information in a double linked list
-func (c *client) StoreData(msg *Message) {
+func (c *client) storeData(msg *Message) {
 	listInsert(msg, c.recieveList)
 }
 
 //Terminate all go rountines and disconnect from the server
-func (c *client) AbortAll() {
+func (c *client) abortAll() {
 	c.connection.Close()
 	c.timerDrop <- true
 	c.readRountineQuit <- true
@@ -210,7 +208,7 @@ func (c *client) AbortAll() {
 
 //if there's extra space in the window, we move as many window elements as
 //we can from the unsent buffer
-func (c *client) SendAllAvailable() bool {
+func (c *client) sendAllAvailable() bool {
 	if len(c.unsentBuffer) == 0 {
 		return false
 	}
@@ -221,7 +219,7 @@ func (c *client) SendAllAvailable() bool {
 		c.windowUnAcked = numSent
 		c.window = c.unsentBuffer[:numSent]
 		for _, elem := range c.window {
-			c.WriteMsg(elem.msg)
+			c.writeMsg(elem.msg)
 		}
 		c.unsentBuffer = c.unsentBuffer[numSent:]
 		return true
@@ -235,7 +233,7 @@ func (c *client) SendAllAvailable() bool {
 			c.window = append(c.window, newSent...)
 			c.windowUnAcked += remain
 			for _, elem := range newSent {
-				c.WriteMsg(elem.msg)
+				c.writeMsg(elem.msg)
 			}
 			c.unsentBuffer = c.unsentBuffer[remain:]
 			return true
@@ -245,7 +243,7 @@ func (c *client) SendAllAvailable() bool {
 
 //if the first few messages in the window is acked, then we need to shift
 //the window backwards
-func (c *client) RemoveFinished() {
+func (c *client) removeFinished() {
 	counter := 0
 	for _, elem := range c.window {
 		if elem.acked {
@@ -264,7 +262,7 @@ func (c *client) RemoveFinished() {
 
 // after receiving ack, then we mark these windows that contains the corresponding
 //messages as acked
-func (c *client) ProcessAck(sn int) bool {
+func (c *client) processAck(sn int) bool {
 	if (c.windowStart >= 0) && (c.windowStart <= sn) {
 		idx := sn - c.windowStart
 		if c.window[idx].acked == false {
@@ -272,9 +270,9 @@ func (c *client) ProcessAck(sn int) bool {
 			c.window[idx].acked = true
 			c.windowUnAcked = c.windowUnAcked - 1
 			if idx == 0 {
-				c.RemoveFinished()
+				c.removeFinished()
 			}
-			res := c.SendAllAvailable()
+			res := c.sendAllAvailable()
 			return res
 		} else {
 			return false
@@ -285,16 +283,16 @@ func (c *client) ProcessAck(sn int) bool {
 }
 
 //immediately send once after sending
-func (c *client) AddNewWindowElem(newElem *sentQueueElem) {
+func (c *client) ackNewWindowElem(newElem *sentQueueElem) {
 	if len(c.window) == 0 {
 		c.window = append(c.window, newElem)
 		c.windowStart = newElem.seqNum
 		c.windowUnAcked = 1
-		c.WriteMsg(newElem.msg)
+		c.writeMsg(newElem.msg)
 	} else if (newElem.seqNum-c.window[0].seqNum < c.params.WindowSize) && (c.windowUnAcked < c.params.MaxUnackedMessages) {
 		c.window = append(c.window, newElem)
 		c.windowUnAcked += 1
-		c.WriteMsg(newElem.msg)
+		c.writeMsg(newElem.msg)
 	} else {
 		c.unsentBuffer = append(c.unsentBuffer, newElem)
 	}
@@ -302,12 +300,12 @@ func (c *client) AddNewWindowElem(newElem *sentQueueElem) {
 
 // add to epoch counter in all window elements
 //resend if backoff is reached
-func (c *client) UpdateWindow() bool {
+func (c *client) updateWindow() bool {
 	sendSth := false
 	for _, element := range c.window {
 		if element.acked == false {
 			if element.epochPassed >= element.backOff {
-				c.WriteMsg(element.msg)
+				c.writeMsg(element.msg)
 				element.epochPassed = 0
 				if element.backOff == 0 {
 					element.backOff += 1
@@ -329,7 +327,7 @@ func (c *client) UpdateWindow() bool {
 //=========================================== End of window functions =====================================
 
 //=========================================== Start of Rountines ==========================================
-func (c *client) TimeAndSendRoutine() {
+func (c *client) timeAndSendRountine() {
 	heartBeatTimer := time.NewTicker(time.Duration(c.params.EpochMillis) * time.Millisecond)
 	dropConnTimer := time.NewTicker(time.Duration(c.params.EpochLimit*c.params.EpochMillis) * time.Millisecond)
 	aliveConfirm := false
@@ -343,7 +341,7 @@ func (c *client) TimeAndSendRoutine() {
 		backOff: 0,
 		msg:     NewConnect(),
 	}
-	c.AddNewWindowElem(newConnElem)
+	c.ackNewWindowElem(newConnElem)
 	for {
 		select {
 		case <-heartBeatTimer.C:
@@ -352,13 +350,14 @@ func (c *client) TimeAndSendRoutine() {
 			if disconnected {
 				continue
 			}
-			resendMsg := c.UpdateWindow()
+			resendMsg := c.updateWindow()
 			// see if new window messsages are sent window
 			aliveConfirm = resendMsg || aliveConfirm
 			if aliveConfirm == false && connConfirm {
-				c.SendConnAck(id)
+				c.sendConnAck(id)
 				// no message sent in the last epoch, send a heart beat indicating connection
 			}
+			aliveConfirm = false
 		case <-dropConnTimer.C:
 			// Max epochs passed, no messages received
 			if connConfirm == false {
@@ -380,12 +379,12 @@ func (c *client) TimeAndSendRoutine() {
 			//received something from the server, reset the timeout Timer
 			dropConnTimer = time.NewTicker(time.Duration(c.params.EpochLimit*c.params.EpochMillis) * time.Millisecond)
 		case newElem := <-c.newWindowElem: // add new element to the window
-			c.AddNewWindowElem(newElem)
+			c.ackNewWindowElem(newElem)
 			aliveConfirm = true
 		case sn := <-c.newAckSeqNum:
 			//new ack recieved
 			// see if new  messsages are placed into the window and sent
-			sendNew := c.ProcessAck(sn)
+			sendNew := c.processAck(sn)
 			aliveConfirm = aliveConfirm || sendNew
 			if sn == 0 {
 				if connConfirm == false {
@@ -413,7 +412,7 @@ func (c *client) TimeAndSendRoutine() {
 }
 
 //Main Rountine of the client
-func (c *client) MainRoutine() {
+func (c *client) mainRoutine() {
 	for {
 		select {
 		case <-c.mainQuit:
@@ -425,7 +424,7 @@ func (c *client) MainRoutine() {
 		case <-c.quitConfirm:
 			//all pending messages sent out, ready for close
 			c.alreadyDisconnect = true
-			c.AbortAll()
+			c.abortAll()
 			return
 		case <-c.disconnect:
 			//connection timed out from server
@@ -462,7 +461,7 @@ func (c *client) MainRoutine() {
 				continue
 			}
 			if msg.SeqNum >= c.wantedMsg {
-				c.StoreData(msg)
+				c.storeData(msg)
 				if len(c.readResponse) == 0 {
 					if (!empty(c.recieveList)) && (c.recieveList.head.seqNum == c.wantedMsg) {
 						readRes := sliceHead(c.recieveList)
@@ -506,7 +505,7 @@ func (c *client) MainRoutine() {
 }
 
 //read messages from server and send the acks directly
-func (c *client) ReadRoutine() {
+func (c *client) readRoutine() {
 	for {
 		select {
 		case <-c.readRountineQuit:
@@ -523,7 +522,7 @@ func (c *client) ReadRoutine() {
 					case MsgData:
 						if checkCorrect(msg) {
 							ack := NewAck(msg.ConnID, msg.SeqNum)
-							c.WriteMsg(ack)
+							c.writeMsg(ack)
 							c.incomeData <- msg
 						}
 					case MsgAck:

@@ -1,182 +1,154 @@
+/*
+ * Scheduler documentation
+ *
+ * We divide every client request into smaller jobs with length no more than 10000 to achieve
+ * equal load for all miners. These jobs are then kept within a priority queue (implemented by
+ * slice); the priority of a job is calculated based on the number of pending jobs of the
+ * request that this job belongs to, and how early this request arrived, which can be determined
+ * by a unique request ID we keep for each request that comes in. When we "push" a job onto the
+ * queue, we are really inserting it into the right location based on the score (priority) we
+ * calculate (See func score and func pushJob).
+ * Whenever a miner becomes available, or a new job is pushed onto the queue, we pop the first
+ * job off and assign it to free miners so that we can either keep the queue empty or keep all
+ * miners busy.
+ */
+
 package main
 
 import (
+	"encoding/json"
 	"fmt"
+	"github.com/cmu440/bitcoin"
+	"github.com/cmu440/lsp"
 	"log"
 	"os"
 	"strconv"
-	"encoding/json"
-	"github.com/cmu440/lsp"
-	"github.com/cmu440/bitcoin"
-	"container/heap"
 )
 
-const maxUint = ^uint64(0)
-const maxWorkload = 1
-const reqIDWeight = 3
-
-type pq []*job
+const maxUint = ^uint64(0) // int max
+const maxWorkload = 10000  // the maximum workload each job can take
+const reqIDWeight = 3      // the weight of connection id when computing priority
+const workloadWeight = 10  // the weight of workload when computing priority
 
 type server struct {
-	lspServer   lsp.Server
-	droppedId   chan int
-	clientReq   chan *clientRequest
-	minerJoin   chan int
-	minerRes    chan *newMinerResult
-	miners      []*miner
-	jobPQ       *pq
-	reqList     []*clientRequest
-	reqCount    int
-	mainClose   chan bool
-	readClose   chan bool
+	lspServer     lsp.Server           // the lsp server
+	droppedIdChan chan int             // channel for passing the dropped client / miner ConnID
+	clientReqChan chan *clientRequest  // the channel for passing client requests to mainRoutine
+	minerJoinChan chan int             // the channel for passing connection ID of the new joined miner
+	minerResChan  chan *newMinerResult // the channel for passing the new computation results sent out by a miner
+	miners        []*miner             // the list of connected miners
+	jobPQ         []*job               // the priority queue for pending jobs obtained from client requests
+	reqList       []*clientRequest     // list of client request
+	reqCount      int                  // the client request ID counter (used for assigning new request ID)
 }
 
 type miner struct {
-	minerID    int
-	avaliable  bool
-	job        *job
+	minerID   int
+	available bool
+	job       *job
 }
 
-
 type clientRequest struct {
-	connID      int
-	reqID       int
-	data      string
-	workingMiners []*miner
-	pendingJobs   []*job
-	lower     uint64
-	upper     uint64
-	result    *Message
-	finished  bool
+	connID        int              // connection ID of the client that sent the request
+	reqID         int              // assigned request ID to the request according to the order they're received
+	data          string           // the date payload string for hash computation
+	workingMiners []*miner         // the number of miners working for this request
+	pendingJobs   []*job           // the split jobs of this request that hasn't been taken by miners
+	lower         uint64           // the lower of client request
+	upper         uint64           // the upper of the client request
+	result        *bitcoin.Message // the result message to send back to client
+	finished      bool             // whether the request is finished
 }
 
 type job struct {
-	reqID    int
-	data     string
-	lower 	 uint64
-	upper  	 uint64
+	reqID int    // request ID of the request this job come from
+	data  string // the payload data for computation
+	lower uint64 // the lower of the input
+	upper uint64 // the upper of the input
 }
 
-type newMinerResult struct{
-	minerID   int
-	hash      uint64
-	nonce     uint64
+type newMinerResult struct {
+	minerID int    // the conn ID of the miner
+	hash    uint64 // the min hashed value
+	nonce   uint64 // the nonce of the result
 }
 
 func startServer(port int) (*server, error) {
-	// TODO: implement this!
 	params := lsp.NewParams()
-    s, err := lsp.NewServer(port, params)
-    if (err != nil){
+	s, err := lsp.NewServer(port, params)
+	if err != nil {
 		return nil, err
 	}
 	newServer := &server{
-		lspServer:  s,
-		droppedId:  make(chan int),
-		clientReq:  make(chan *clientRequest),
-		minerJoin:  make(chan int),
-		minerRes:   make(chan *newMinerResult),
-		miners:     nil,
-		jobPQ:      nil,
-		reqList:    nil,
-		reqCount:   0,
-		mainClose:  make(chan bool),
-		readClose:  make(chan bool), 
-    }
+		lspServer:     s,
+		droppedIdChan: make(chan int),
+		clientReqChan: make(chan *clientRequest),
+		minerJoinChan: make(chan int),
+		minerResChan:  make(chan *newMinerResult),
+		miners:        nil,
+		jobPQ:         nil,
+		reqList:       nil,
+		reqCount:      0,
+	}
 	return newServer, nil
 }
 
-var LOGF *log.Logger   
+var LOGF *log.Logger
 
-
-
-func (s *server) mainRoutine(){
+func (s *server) mainRoutine() {
 	for {
-		select{
-		case <- s.mainClose:
-			return 
-		case req := <- s.clientReq:
+		select {
+		case req := <-s.clientReqChan:
 			var splits uint64
 			// append to client req list
 			req.reqID = s.reqCount
 			req.finished = false
 			s.reqCount += 1
-			s.reqList = append(s.reqList, req)			
-			req.result = bitcoin.NewResult(maxUint, -1)
+			s.reqList = append(s.reqList, req)
 			// divide work and push to queue
-			splits = (req.upper - req.lower - 1) / maxWorkload + 1
-			var currLower uint64
-			var currUpper uint64
-			for j:= 0; j<splits; j++ {
-				currLower = req.lower + j * maxWorkload
-				if (j == splits-1) {
+			splits = (req.upper-req.lower)/maxWorkload + 1
+			var currLower, currUpper uint64
+			for j := uint64(0); j < splits; j++ {
+				currLower = req.lower + (j * maxWorkload)
+				if j == splits-1 {
 					currUpper = req.upper
 				} else {
-					currUpper = currLower + maxWorkload
+					currUpper = currLower + maxWorkload - 1
 				}
 				newJob := &job{
-					reqID:     req.reqID,
-					data:      req.data,
-					lower:     currLower,
-					upper:     currUpper,
+					reqID: req.reqID,
+					data:  req.data,
+					lower: currLower,
+					upper: currUpper,
 				}
 				// add job to pendingJobs
 				req.pendingJobs = append(req.pendingJobs, newJob)
-				s.jobPQ = push(s.jobPQ, newJob)
+				s.pushJob(newJob)
 			}
 			s.assignJobs()
 
-		case minerID := <-s.minerJoin:
-			newMiner := &miner {
-				minerID: minerID,
+		case minerID := <-s.minerJoinChan:
+			newMiner := &miner{
+				minerID:   minerID,
 				available: true,
 				job:       nil,
 			}
 			s.miners = append(s.miners, newMiner)
-			//TODO: remove the first job from the priority queue and assign to the miner
+			// remove the first job from the priority queue and assign to the miner
 			s.assignJobs()
 
-		case minerRes := <- s.minerRes:
-			// TODO: mark job finished, check if the client request is finished
-			// TODO: assign new job to miner
-			// Step1: check if miner still exists:
-			for i, m := range s.miners {
+		case minerRes := <-s.minerResChan:
+			// mark job finished, check if the client request is finished
+			// assign new job to miner
+			// Step 1: check if miner still exists:
+			for _, m := range s.miners {
 				if m.minerID == minerRes.minerID {
-					m.avaliable = true
-					//Step2 : if exist, send result to clientRequest
-					// for j, r := range s.reqList {
-					// 	if r.reqID == m.job.reqID && !r.finished {
-					// 		//Step3 : remove it from the working miners in the client request
-					// 		if minerRes.hash < r.result.Hash {
-					// 			r.result.Hash = minerRes.hash
-					// 			r.result.Nonce = minerRes.nonce
-					// 		}
-					// 		for p, workingMiner := range r.workingMiners {
-					// 			if workingMiner.minerID == m.minerID {
-					// 				copy(r.workingMiners[p:], r.workingMiners[p+1:])
-					// 				r.workingMiners = r.workingMiners[:len(r.workingMiners)-1]
-					// 				break
-					// 			}
-					// 		}
-					// 		//Step 4: check if the request is already accomplished
-					// 		if (len(r.workingMiners)==0) && (len(r.pendingJobs)==0) {
-					// 			connID := r.connID
-					// 			payload, _ := json.Marshal(r.result)
-					// 			s.lspServer.Write(connID, payload)
-					// 			//Remove the request from list
-					// 			// copy(s.reqList[j:], s.reqList[j+1:])
-					// 			// s.reqList = s.reqList[:len(s.reqList)-1]
-					// 			r.finished = true
-					// 		}
-					// 		break
-					// 	}
-					// }
+					m.available = true
 					r := s.reqList[m.job.reqID]
 					if !r.finished {
-						//Step3 : remove it from the working miners in the client request
-						if minerRes.hash < r.result.Hash {
-							r.result.Hash = minerRes.hash
-							r.result.Nonce = minerRes.nonce
+						// Step 2: remove it from the working miners in the client request
+						if r.result == nil || minerRes.hash < r.result.Hash {
+							r.result = bitcoin.NewResult(minerRes.hash, minerRes.nonce)
 						}
 						for p, workingMiner := range r.workingMiners {
 							if workingMiner.minerID == m.minerID {
@@ -185,8 +157,8 @@ func (s *server) mainRoutine(){
 								break
 							}
 						}
-						//Step 4: check if the request is already accomplished
-						if (len(r.workingMiners)==0) && (len(r.pendingJobs)==0) {
+						//Step 3: check if the request is already accomplished
+						if (len(r.workingMiners) == 0) && (len(r.pendingJobs) == 0) {
 							connID := r.connID
 							payload, _ := json.Marshal(r.result)
 							s.lspServer.Write(connID, payload)
@@ -194,35 +166,33 @@ func (s *server) mainRoutine(){
 							r.finished = true
 						}
 					}
-					//Step5 : assign new jobs to the miner 
+					//Step 4: assign new jobs to the miner
 					s.assignJobs()
 				}
 			}
-		case id := <- s.droppedId:
-			// TODO: check the id against client and miner list / map
-			// TODO: check if it is client or miner
+
+		case id := <-s.droppedIdChan:
+			// check the id against client and miner list
+			// check if it is client or miner
 			isMiner := false
 			for i, m := range s.miners {
-				if (m.minerID == id) {
+				if m.minerID == id {
 					isMiner = true
-					if !m.available {func priority()
-						//Assigned with a job, push it back to PQ
-						
-						// TODO: add job to req pendingJobs
-						// TODO: remove miner from req workingMiners
-						for i, r := range s.reqList{
-							if r.reqID == m.job.reqID && !r.finished {
-								for j, workingMiner:= range r.workingMiners {
-									if (workingMiner == m) {
-										copy(r.workingMiners[j:], r.workingMiners[j+1:])
-										r.workingMiners = r.workingMiners[:len(r.workingMiners)-1]
-										break
-									}
+					if !m.available { // assigned with a job, push it back to PQ
+						// add job to req pendingJobs
+						// remove miner from req workingMiners
+						r := s.reqList[m.job.reqID]
+						if !r.finished {
+							for j, workingMiner := range r.workingMiners {
+								if workingMiner == m {
+									copy(r.workingMiners[j:], r.workingMiners[j+1:])
+									r.workingMiners = r.workingMiners[:len(r.workingMiners)-1]
+									break
 								}
-								r.pendingJobs = append(r.pendingJobs, m.job)
-								s.jobPQ = push(s.jobPQ, m.job)
-								break
 							}
+							r.pendingJobs = append(r.pendingJobs, m.job)
+							s.pushJob(m.job)
+							s.assignJobs()
 						}
 					}
 					copy(s.miners[i:], s.miners[i+1:])
@@ -230,18 +200,15 @@ func (s *server) mainRoutine(){
 					break
 				}
 			}
-			// TODO: if it's a client ID, remove all requests associated with this client
+			// if it's a client ID, remove all requests associated with this client
 			if !isMiner {
-				for i, r := range s.reqList {
+				for _, r := range s.reqList {
 					if r.connID == id && !r.finished {
 						for _, m := range r.workingMiners {
 							m.available = true
 						}
 						s.assignJobs()
-						// copy(s.reqList[i:], s.reqList[i+1:])
-						// s.reqList = s.reqList[:len(s.reqList)-1]
 						r.finished = true
-						// TODO: verify "one connection per request"
 						break
 					}
 				}
@@ -249,94 +216,78 @@ func (s *server) mainRoutine(){
 		}
 	}
 }
-
-
 
 func (s *server) assignJobs() {
 	// find free miners
 	for _, m := range s.miners {
-		if m.available {
+		for m.available && len(s.jobPQ) > 0 {
 			// pop job from job list and assign to input miner
-			var job *job
-			job, s.jobPQ = pop(s.jobPQ)
-			if m.jobPQ == nil {
-				break
-			}
+			job := s.popJob()
 
-			for _, r:= range s.reqList {
-				if r.reqID != job.reqID || r.finished {
-					continue
-				}
-				
-				for idx,pendingJob := range r.pendingJobs {
-					if pendingJob == job {
-						// remove job from req pendingJobs
-						copy(r.pendingJobs[idx:], r.pendingJobs[idx+1:])
-						r.pendingJobs = r.pendingJobs[:len(r.pendingJobs)-1]
-						// add miner to req workingMiners
-						r.workingMiners = append(r.workingMiners, m)
-						m.available = false
-						m.job = job
-						// write Request to miner
-						msg := json.Marshal(NewRequest(job.data, job.lower, job.upper))
-						s.lspServer.Write(m.minerID, msg)
-						break
-					}
-				}
-				break
-			}
-		}
-	}
-} 
-
-
-func (s *server) readRoutine(){
-	for {
-		select {
-		case <- s.readClose:
-			return
-		default:
-			connID, bytes, err = s.lspServer.Read()
-			if (err != nil) {
-				// client / miner dropped
-				droppedId <- connID
+			r := s.reqList[job.reqID]
+			if r.finished {
 				continue
 			}
-			var msg bitcoin.Message
-			infoErr := json.Unmarshal(bytes, &msg)
-			if (infoErr == nil) {
-				switch msg.Type {
-				case bitcoin.Request:
-					// new client request
-					newClient := &clientRequest{
-						connID:    connID,
-						reqID:     -1,
-						data:      msg.Data,
-						lower:     msg.Lower,
-						upper:     msg.Upper,
-						minerIDs:  nil,
-					}
-					s.clientReq <- newClient
-
-				case bitcoin.Join:
-					// new miner
-					s.minerJoin <- connID
-
-				case bitcoin.Result:
-					// result from miner
-					res := &newMinerResult{
-						minerID:  connID,
-						hash:     msg.Hash,
-						nonce:    msg.Nonce,
-					}
-					s.minerRes <- res
+			for idx, pendingJob := range r.pendingJobs {
+				if pendingJob == job {
+					// remove job from req pendingJobs
+					copy(r.pendingJobs[idx:], r.pendingJobs[idx+1:])
+					r.pendingJobs = r.pendingJobs[:len(r.pendingJobs)-1]
+					// add miner to req workingMiners
+					r.workingMiners = append(r.workingMiners, m)
+					m.available = false
+					m.job = job
+					// write Request to miner
+					msg, _ := json.Marshal(bitcoin.NewRequest(job.data, job.lower, job.upper))
+					s.lspServer.Write(m.minerID, msg)
+					break
 				}
 			}
 		}
 	}
 }
 
-
+func (s *server) readRoutine() {
+	for {
+		connID, bytes, err := s.lspServer.Read()
+		if err != nil {
+			// client / miner dropped
+			s.droppedIdChan <- connID
+			continue
+		}
+		var msg bitcoin.Message
+		infoErr := json.Unmarshal(bytes, &msg)
+		if infoErr == nil {
+			switch msg.Type {
+			case bitcoin.Request:
+				// new client request
+				newClient := &clientRequest{
+					connID:        connID,
+					reqID:         -1,
+					data:          msg.Data,
+					lower:         msg.Lower,
+					upper:         msg.Upper,
+					workingMiners: nil,
+					pendingJobs:   nil,
+					finished:      false,
+					result:        nil,
+				}
+				s.clientReqChan <- newClient
+			case bitcoin.Join:
+				// new miner
+				s.minerJoinChan <- connID
+			case bitcoin.Result:
+				// result from miner
+				res := &newMinerResult{
+					minerID: connID,
+					hash:    msg.Hash,
+					nonce:   msg.Nonce,
+				}
+				s.minerResChan <- res
+			}
+		}
+	}
+}
 
 func main() {
 	// You may need a logger for debug purpose
@@ -369,7 +320,6 @@ func main() {
 
 	srv, err := startServer(port)
 	if err != nil {
-		fmt.Println(err.Error())
 		return
 	}
 	fmt.Println("Server listening on port", port)
@@ -379,26 +329,47 @@ func main() {
 	srv.mainRoutine()
 }
 
-func score(j *job) {
-	
-	return 
-}
-// PQ functions
-func push(queue *pq, j *job) {
-	
-	return append(queue, j)
+// score in priority queue for insertion (smaller score corresponds to higher priority)
+func (s *server) score(j *job) int {
+	req := s.reqList[j.reqID]
+	score := (reqIDWeight * j.reqID) + (workloadWeight * len(req.pendingJobs))
+	return score
 }
 
-func pop(queue *pq) (*job, *pq) {
-	if len(queue) > 1 {
-		return queue[0], queue[1:]
-	} else if len(queue) == 1 {
-		return queue[0], nil
-	} else {
-		return nil, nil
+// insert job into the priority queue
+func (s *server) pushJob(j *job) {
+	newQ := make([]*job, len(s.jobPQ)+1)
+	inserted := false
+	for idx, elem := range s.jobPQ {
+		if inserted {
+			newQ[idx+1] = elem
+		} else {
+			if s.score(elem) > s.score(j) {
+				newQ[idx] = j
+				inserted = true
+				newQ[idx+1] = elem
+			} else {
+				newQ[idx] = elem
+			}
+		}
 	}
+	if !inserted {
+		newQ[len(s.jobPQ)] = j
+	}
+	s.jobPQ = newQ
 }
 
-func new() *pq {
-	return nil
+// pop the first job from priority queue
+func (s *server) popJob() *job {
+	if len(s.jobPQ) > 1 {
+		job := s.jobPQ[0]
+		s.jobPQ = s.jobPQ[1:]
+		return job
+	} else if len(s.jobPQ) == 1 {
+		job := s.jobPQ[0]
+		s.jobPQ = nil
+		return job
+	} else {
+		return nil
+	}
 }

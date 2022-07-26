@@ -1,11 +1,12 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
+	"github.com/cmu440/bitcoin"
+	"github.com/cmu440/lsp"
 	"os"
 	"strconv"
-
-	"github.com/cmu440/lsp"
 )
 
 func main() {
@@ -30,11 +31,21 @@ func main() {
 
 	defer client.Close()
 
-	_ = message    // Keep compiler happy. Please remove!
-	_ = maxNonce   // Keep compiler happy. Please remove!
-	// TODO: implement this!
+	req := bitcoin.NewRequest(message, 0, maxNonce)
+	payload, _ := json.Marshal(req)
+	client.Write(payload)
 
-	printResult(0, 0)
+	// blocks until a message arrives
+	msg, err := client.Read()
+	// server drops, return
+	if err != nil {
+		printDisconnected()
+		return
+	}
+
+	var result *bitcoin.Message
+	json.Unmarshal(msg, &result)
+	printResult(result.Hash, result.Nonce)
 }
 
 // printResult prints the final result to stdout.
