@@ -1,7 +1,7 @@
-p1
+Distributed Bitcoin Miner
 ==
 
-This repository contains the starter code for project 1 (15-440, Fall 2020). It also contains
+This repository implements a mock distributed bitcoin miner based on Remote Procedure Calls (RPC), developed from  project 1 (15-440, Fall 2020). It also contains
 the tests that we will use to grade your implementation, and two simple echo server/client
 (`srunner` and `crunner`, respectively) programs that you might find useful for your own testing
 purposes. These instructions assume you have set your `GOPATH` to point to the repository's
