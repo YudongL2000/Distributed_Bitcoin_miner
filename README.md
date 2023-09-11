@@ -169,37 +169,6 @@ We have provided *basic* tests for your miner and client implementations. Note t
 
 To sanity tests, you need to ensure you have compiled version of `client`, `miner` and `server` in `$GOPATH/bin`. Then you can run `ctest` and `mtest` (without any parameter) in `$GOPATH/bin/{YOUR-OS}/`.
 
-### Submitting to Gradescope
-
-To submit your code to Gradescope, create a `cmu440.zip` file containing your part A and part B implementation
-as follows:
-
-```sh
-cd p1/src/github.com/
-zip -r cmu440.zip cmu440/
-```
-
-Note that the following files will be automatically ignored by Gradescope in your submissions:
-
-```sh
-cmu440/lsp/client_api.go
-cmu440/lsp/server_api.go
-cmu440/lsp/params.go
-cmu440/lsp/message.go
-cmu440/lsp/*_test.go
-cmu440/lsp/checksum.go
-cmu440/lsp/*.sh
-cmu440/lspnet/
-cmu440/crunner/
-cmu440/srunner/
-cmu440/bitcoin/hash.go
-cmu440/bitcoin/message.go
-```
-
-Make sure your implementation is not in those files.
-
-## Miscellaneous
-
 ### Reading the API Documentation
 
 Before you begin the project, you should read and understand all of the starter code we provide.
